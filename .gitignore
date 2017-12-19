@@ -1,0 +1,9 @@
+# gitignore 生成
+
+# checkpoints は要らない
+.ipynb_checkpoints/
+/.ipynb_checkpoints/
+
+# .DS_Store は Mac OS 限定
+.DS_Store
+/.DS_Store
