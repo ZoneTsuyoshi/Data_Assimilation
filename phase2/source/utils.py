@@ -109,7 +109,9 @@ def get_params(obj):
     '''Get names and values of all parameters in `obj`'s __init__'''
     try:
         # get names of every variable in the argument
+        # getargspec 関数は v3 でお勧めされていないため，signature 関数を使いたい
         args = inspect.getargspec(obj.__init__)[0]
+        #args = inspect.signature(obj.__init__)[0]
         args.pop(0)   # remove "self"
 
         # get values for each of the above in the object
