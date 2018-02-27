@@ -4,6 +4,7 @@ pykalman を参考にして作成する
 pykalman では欠測値に対応できていないので，欠測にも対応できるクラス作成がメインテーマ
 -> と思っていたけど，マスク処理で対応している
 -> 欠測値(NaN)の場合は自動でマスク処理するようなコードを追加すれば拡張の意義がある
+現段階では，ほぼ pykalman と同じようなコードになっている
 '''
 
 
@@ -113,90 +114,88 @@ class Kalman_Filter(object) :
                 em_vars=['transition_covariance', 'observation_covariance',
                     'initial_mean', 'initial_covariance'],
                 n_dim_sys = None, n_dim_obs = None) :
+        
         # 次元決定
-        if transition_offsets is None :
-            if transition_noise_matrices is None :
-                self.n_dim_sys = self._determine_dimensionality(
-                    [(transition_matrices, array2d, -2),
-                     (initial_mean, array1d, -1),
-                     (initial_covariance, array2d, -2),
-                     (observation_matrices, array2d, -1)],
-                    n_dim_sys
-                    )
-            else :
-                self.n_dim_sys = self._determine_dimensionality(
-                    [(transition_matrices, array2d, -2),
-                     (transition_noise_matrices, array2d, -2),
-                     (initial_mean, array1d, -1),
-                     (initial_covariance, array2d, -2),
-                     (observation_matrices, array2d, -1)],
-                    n_dim_sys
-                    )
-        elif transition_noise_matrices is None :
-            self.n_dim_sys = self._determine_dimensionality(
-                [(transition_matrices, array2d, -2),
-                 (transition_offsets, array1d, -1),
-                 (initial_mean, array1d, -1),
-                 (initial_covariance, array2d, -2),
-                 (observation_matrices, array2d, -1)],
-                n_dim_sys
-            )
-        else :
-            self.n_dim_sys = self._determine_dimensionality(
-                [(transition_matrices, array2d, -2),
-                 (transition_offsets, array1d, -1),
-                 (transition_noise_matrices, array2d, -2),
-                 (initial_mean, array1d, -1),
-                 (initial_covariance, array2d, -2),
-                 (observation_matrices, array2d, -1)],
-                n_dim_sys
-            )
+        self.n_dim_sys = self._determine_dimensionality(
+            [(transition_matrices, array2d, -2),
+             (transition_offsets, array1d, -1),
+             (transition_noise_matrices, array2d, -2),
+             (initial_mean, array1d, -1),
+             (initial_covariance, array2d, -2),
+             (observation_matrices, array2d, -1)],
+            n_dim_sys
+        )
 
-        if observation_offsets is None:
-            self.n_dim_obs = self._determine_dimensionality(
-                [(observation_matrices, array2d, -2),
-                 (observation_covariance, array2d, -2)],
-                n_dim_obs
-            )
-        else :
-            self.n_dim_obs = self._determine_dimensionality(
-                [(observation_matrices, array2d, -2),
-                 (observation_offsets, array1d, -1),
-                 (observation_covariance, array2d, -2)],
-                n_dim_obs
-            )
+        self.n_dim_obs = self._determine_dimensionality(
+            [(observation_matrices, array2d, -2),
+             (observation_offsets, array1d, -1),
+             (observation_covariance, array2d, -2)],
+            n_dim_obs
+        )
 
         # transition_noise_matrices を設定していない場合は，system と次元を一致させる
         if transition_noise_matrices is None :
             self.n_dim_noise = self._determine_dimensionality(
-                    [(transition_covariance, array2d, -2),
-                    self.n_dim_sys]
+                    [(transition_covariance, array2d, -2)],
+                    self.n_dim_sys
                 )
-            transition_noise_matrices = np.eye(self.n_dim_sys)
+            transition_noise_matrices = np.eye(self.n_dim_noise)
         else :
             self.n_dim_noise = self._determine_dimensionality(
                     [(transition_noise_matrices, array2d, -1),
                      (transition_covariance, array2d, -2)]
                 )
 
+
         # 次元数をチェック，欠測値のマスク処理
         self.y = self._parse_observations(observation)
 
-        self.initial_mean = initial_mean
-        self.initial_covariance = initial_covariance
-        self.F = transition_matrices
-        self.Q = self._calc_transition_covariance(transition_noise_matrices, transition_covariance)
+        # initial_mean が未入力ならば零ベクトル
+        if initial_mean is None:
+            self.initial_mean = np.zeros(self.n_dim_sys)
+        else:
+            self.initial_mean = initial_mean
+        
+        # initial_covariance が未入力ならば単位行列
+        if initial_covariance is None:
+            self.initial_covariance = np.eye(self.n_dim_sys)
+        else:
+            self.initial_covariance = initial_covariance
 
-        # オフセットが未入力であれば，0にしておく
+        # transition_matrices が未入力ならば単位行列
+        if transition_matrices is None:
+            self.F = np.eye(self.n_dim_sys)
+        else:
+            self.F = transition_matrices
+
+        # transition_covariance が未入力ならば単位行列
+        if transition_covariance is not None:
+            if transition_noise_matrices is not None:
+                self.Q = self._calc_transition_covariance(transition_noise_matrices, transition_covariance)
+            else:
+                self.Q = transition_covariance
+        else:
+            self.Q = np.eye(self.n_dim_sys)
+
+        # transition_offsets が未入力であれば，零ベクトル
         if transition_offsets is None :
             self.b = np.zeros(self.n_dim_sys)
         else :
             self.b = transition_offsets
 
-        self.H = observation_matrices
-        self.R = observation_covariance
+        # observation_matrices が未入力であれば，単位行列
+        if observation_matrices is None:
+            self.H = np.eye(self.n_dim_obs, self.n_dim_sys)
+        else:
+            self.H = observation_matrices
+        
+        # observation_covariance が未入力であれば，単位行列
+        if observation_covariance is None:
+            self.R = np.eye(self.n_dim_obs)
+        else:
+            self.R = observation_covariance
 
-        # オフセットが未入力であれば，0にしておく
+        # observation_offsets が未入力であれば，零ベクトル
         if observation_offsets is None :
             self.d = np.zeros(self.n_dim_obs)
         else :
@@ -227,6 +226,9 @@ class Kalman_Filter(object) :
             : Kalman gain matrix for time t [時間軸，状態変数軸，観測変数軸]
             各時刻のカルマンゲイン
         '''
+
+        # パラメータを初期化
+        #self.F, self.b, self.Q, self.H, self.d, self.R, self.initial_mean, self.initial_covariance = self._initialize_parameters()
 
         # y が未入力であればクラス作成時に入力された y を用いる
         if y is None:
@@ -326,6 +328,10 @@ class Kalman_Filter(object) :
             各時刻の固定区間平滑化ゲイン [時間軸，状態変数軸，状態変数軸]
         '''
 
+        # パラメータの初期化
+        #self.F, self.b, self.Q, self.H, self.d, self.R, self.initial_mean, self.initial_covariance = self._initialize_parameters()
+
+
         # y が入力されていなければクラス作成時に入力した y を用いる
         if y is None:
             y = self.y
@@ -401,6 +407,9 @@ class Kalman_Filter(object) :
             EM algorithm で最適化するパラメータ群
         """
 
+        # パラメータを初期化
+        #self.F, self.b, self.Q, self.H, self.d, self.R, self.initial_mean, self.initial_covariance = self._initialize_parameters()
+
         # y が未入力であればクラス作成時に入力した観測yをEMで回す
         if y is None:
             y = self.y
@@ -438,6 +447,7 @@ class Kalman_Filter(object) :
         # DIM に含まれているパラメータだけ get_params で取得して考える
         # get_params で取得するとき，__init__ 関数の入力値を考える
         # given に含まれていないパラメータが時不変でなければ警告を出す
+        '''
         for (k, v) in get_params(self).items():
             if k in DIM and (not k in given) and len(v.shape) != DIM[k]:
                 warn_str = (
@@ -445,6 +455,7 @@ class Kalman_Filter(object) :
                     + 'it will have dimension {2}'
                 ).format(k, len(v.shape), DIM[k])
                 warnings.warn(warn_str)
+                '''
 
         # Actual EM iterations
         # EM algorithm の計算
@@ -455,7 +466,7 @@ class Kalman_Filter(object) :
             
             # sigma pair smooth
             # 時刻 t,t-1 のシステムの共分散遷移
-            self.V_pair(y)
+            self._sigma_pair_smooth(y)
 
             # M step
             self._calc_em(y, given = given)
@@ -525,7 +536,7 @@ class Kalman_Filter(object) :
             return np.matmul(G, np.matmul(Q, GT))
         else:
             raise ValueError('The ndim of transition_covariance should be 2 or 3, but your input is ' + str(Q.ndim) + '.')
-    
+
 
     # parse observations (観測変数の次元チェック，マスク処理)
     def _parse_observations(self, obs):
@@ -590,12 +601,12 @@ class Kalman_Filter(object) :
         T = y.shape[0]
 
         # pairwise covariance
-        self.V_pair = np.zeros((T, self.n_dim_sys, self.n_dim_sys))
+        self.V_pair = np.zeros([T, self.n_dim_sys, self.n_dim_sys])
 
         # t in [1, T-1]
         # 文献の計算と甚だ違うが，pykalman ではこうなっている
         for t in range(1, T):
-            self.V_pair = np.dot(self.V_RTS[t], self.K[t-1].T)
+            self.V_pair[t] = np.dot(self.V_RTS[t], self.A[t-1].T)
 
 
     # calculate parameters by EM algorithm
@@ -623,14 +634,15 @@ class Kalman_Filter(object) :
 
             for t in range(T):
                 # 欠測がない y_t に関して
-                if not np.any(np.ma.getmask(observations[t])):
+                if not np.any(np.ma.getmask(y[t])):
                     d = self._last_dims(self.d, t, 1)
                     # それぞれの要素毎の積を取りたいので，outer(外積)を使う
                     res1 += np.outer(y[t] - d, self.x_RTS[t])
                     res2 += self.V_RTS[t] + np.outer(self.x_RTS[t], self.x_RTS[t])
 
             # observation_matrices (H) を更新
-            self.H = np.dot(res1, res2)
+            self.H = np.dot(res1, linalg.pinv(res2))
+
 
         # 次に observation_covariance を更新
         if 'observation_covariance' not in given:
@@ -653,7 +665,7 @@ class Kalman_Filter(object) :
                     H = self._last_dims(self.H, t)
                     d = self._last_dims(self.d, t, 1)
                     err = y[t] - np.dot(H, self.x_RTS[t]) - d
-                    res += np.outer(err, err) + np.dot(H, np.dot(self.x_RTS[t], H.T))
+                    res += np.outer(err, err) + np.dot(H, np.dot(self.V_RTS[t], H.T))
                     n_obs += 1
             
             # 観測が1回でも確認できた場合
@@ -661,6 +673,7 @@ class Kalman_Filter(object) :
                 self.R = (1.0 / n_obs) * res
             else:
                 self.R = res
+
 
         # 次に transition_matrices の更新
         if 'transition_matrices' not in given:
@@ -673,8 +686,8 @@ class Kalman_Filter(object) :
              ( \sum_{t=1}^{T-1} \mathbb{E}[x_{t-1} x_{t-1}^T] )^{-1}
              '''
             #計算補助
-            res1 = np.zeros((self.n_dim_sys, n_dim_sys))
-            res2 = np.zeros((self.n_dim_sys, n_dim_sys))
+            res1 = np.zeros((self.n_dim_sys, self.n_dim_sys))
+            res2 = np.zeros((self.n_dim_sys, self.n_dim_sys))
             for t in range(1, T):
                 b = self._last_dims(self.b, t - 1, 1)
                 res1 += self.V_pair[t] + np.outer(self.x_RTS[t], self.x_RTS[t - 1])
@@ -704,31 +717,73 @@ class Kalman_Filter(object) :
                 F = self._last_dims(self.F, t)
                 b = self._last_dims(self.b, t, 1)
                 err = self.x_RTS[t + 1] - np.dot(F, self.x_RTS[t]) - b
-                Vt1t_A = np.dot(self.V_pair[t + 1], F.T)
+                Vt1t_F = np.dot(self.V_pair[t + 1], F.T)
                 res += (
                     np.outer(err, err)
-                    + np.dot(F, np.dot(self.x_RTS[t], F.T))
-                    + self.x_RTS[t + 1]
-                    - Vt1t_A - Vt1t_A.T
+                    + np.dot(F, np.dot(self.V_RTS[t], F.T))
+                    + self.V_RTS[t + 1]
+                    - Vt1t_F - Vt1t_F.T
                 )
 
-            return (1.0 / (T - 1)) * res
+            self.Q = (1.0 / (T - 1)) * res
 
 
         # 次に initial_mean の更新
         if 'initial_mean' not in  given:
+            '''math
+            x_0 : system of t=0
+                \mu_0 = \mathbb{E}[x_0]
+            '''
+            self.initial_mean = self.x_RTS[0]
 
 
         # 次に initial_covariance の更新
         if 'initial_covariance' not in given:
+            '''math
+            mu_0 : system of t=0
+                \Sigma_0 = \mathbb{E}[x_0, x_0^T] - \mu_0 \mu_0^T
+            '''
+            #self.initial_covariance = self.V_RTS[0] - np.outer(self.x_RTS[0], self.x_RTS[0])
+            x0 = self.x_RTS[0]
+            x0_x0 = self.V_RTS[0] + np.outer(x0, x0)
+            self.initial_covariance = x0_x0 - np.outer(self.initial_mean, x0)
+            self.initial_covariance += - np.outer(x0, self.initial_mean) + np.outer(self.initial_mean, self.initial_mean)
 
 
         # 次に transition_offsets の更新
         if 'transition_offsets' not in given:
+            '''math
+            b : transition_offsets, x_t : system
+            F_t : transition_matrices
+                b = \frac{1}{T-1} \sum_{t=1}^{T-1}
+                        \mathbb{E}[x_t] - F_{t-1} \mathbb{E}[x_{t-1}]
+            '''
+            self.b = np.zeros(self.n_dim_sys)
+
+            # 最低でも3点での値が必要
+            if T > 1:
+                for t in range(1, T):
+                    F = self._last_dims(self.F, t - 1)
+                    self.b += self.x_RTS[t] - np.dot(F, self.x_RTS[t - 1])
+                self.b *= (1.0 / (T - 1))
 
 
         # 最後に observation_offsets の更新
         if 'observation_offsets' not in given:
+            '''math
+            d : observation_offsets, y_t : observation
+            H_t : observation_matrices, x_t : system
+                d = \frac{1}{T} \sum_{t=0}^{T-1} y_t - H_{t} \mathbb{E}[x_{t}]
+            '''
+            self.d = np.zeros(self.n_dim_obs)
+            n_obs = 0
+            for t in range(T):
+                if not np.any(np.ma.getmask(y[t])):
+                    H = self._last_dims(self.H, t)
+                    self.d += y[t] - np.dot(H, self.x_RTS[t])
+                    n_obs += 1
+            if n_obs > 0:
+                self.d *= (1.0 / n_obs)
 
 
 
