@@ -10,10 +10,11 @@ Repository for Data Assimilation
     - I will make class for KF, EnKF, PF, 4D-Var and UKF.
     - Kalman Filter (KF)
     	- coded basic filter and smoothing
-    	$$
-    	\begin{align}
-    	x_{t+1} = F_t x_t + b_t + v_t,\ v_t\sim N(0, Q_t)
-    	y_t = H_t x_t + d_t + w_t,\ w_t\sim N(0, R_t)
-    	\end{align}
-    	$$
     	- coded basic EM algorithm while referencing to [pykalman](https://github.com/pykalman/pykalman)
+
+$$
+\begin{align}
+x_{t+1} = F_t x_t + b_t + v_t,\ v_t\sim N(0, Q_t)
+y_t = H_t x_t + d_t + w_t,\ w_t\sim N(0, R_t)
+\end{align}
+$$
