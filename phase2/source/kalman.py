@@ -5,6 +5,9 @@ pykalman では欠測値に対応できていないので，欠測にも対応�
 -> と思っていたけど，マスク処理で対応している
 -> 欠測値(NaN)の場合は自動でマスク処理するようなコードを追加すれば拡張の意義がある
 現段階では，ほぼ pykalman と同じようなコードになっている
+
+18.03.13
+行列の特定の要素を最適化できる EM Algorithm に改変
 '''
 
 
@@ -68,6 +71,8 @@ class Kalman_Filter(object) :
     observation_offsets [n_time, n_dim_obs] or [n_dim_obs] {numpy-array, float}
         : offsets of observation model
         観測モデルの切片[時間軸，観測変数軸] or [観測変数軸]
+    em_vars {list, string} : variable name list for EM algorithm (EMアルゴリズムで最適化する変数リスト)
+    em_dics {dictionary} : dictionary for EM algorithm (EMアルゴリズムで最適化する変数に固定要素がある場合のリスト)
     n_dim_sys {int} : dimension of system variable （システム変数の次元）
     n_dim_obs {int} : dimension of observation variable （観測変数の次元）
 
@@ -111,8 +116,9 @@ class Kalman_Filter(object) :
                 transition_covariance = None, observation_covariance = None,
                 transition_noise_matrices = None,
                 transition_offsets = None, observation_offsets = None,
-                em_vars=['transition_covariance', 'observation_covariance',
+                em_vars = ['transition_covariance', 'observation_covariance',
                     'initial_mean', 'initial_covariance'],
+                em_dics = {},
                 n_dim_sys = None, n_dim_obs = None) :
         
         # 次元決定
@@ -203,6 +209,7 @@ class Kalman_Filter(object) :
 
         # EM algorithm で最適化するパラメータ群
         self.em_vars = em_vars
+        self.em_dics = em_dics
 
 
     # filter function (フィルタ値を計算する関数)
@@ -386,7 +393,7 @@ class Kalman_Filter(object) :
 
 
     # em algorithm
-    def em(self, y = None, n_iter = 10, em_vars = None):
+    def em(self, y = None, n_iter = 10, em_vars = None, em_dics = None):
         """Apply the EM algorithm
         Apply the EM algorithm to estimate all parameters specified by `em_vars`.
         em_vars に入れられているパラメータ集合について EM algorithm を用いて最適化する．
@@ -405,6 +412,8 @@ class Kalman_Filter(object) :
             variables to perform EM over.  Any variable not appearing here is
             left untouched.
             EM algorithm で最適化するパラメータ群
+        em_dics : dictionaries to perform EM over.
+            EM algorithm で最適化するパラメータの固定要素ディクショナリ
         """
 
         # パラメータを初期化
@@ -421,6 +430,10 @@ class Kalman_Filter(object) :
         # em_vars が入力されなかったらクラス作成時に入力した em_vars を使用
         if em_vars is None:
             em_vars = self.em_vars
+
+        # em_dics が未入力ならばクラス作成時に入力した em_dics を使用
+        if em_dics is None:
+            em_dics = self.em_dics
 
         # em_vars を setting
         if em_vars == 'all':
@@ -469,7 +482,7 @@ class Kalman_Filter(object) :
             self._sigma_pair_smooth(y)
 
             # M step
-            self._calc_em(y, given = given)
+            self._calc_em(y, given = given, em_dics = em_dics)
         return self
 
 
@@ -611,7 +624,7 @@ class Kalman_Filter(object) :
 
     # calculate parameters by EM algorithm
     # EM algorithm を用いたパラメータ計算
-    def _calc_em(self, y, given = {}):
+    def _calc_em(self, y, given = {}, em_dics = {}):
         '''
         y [n_time, n_dim_obs] {masked-numpy-array, float} : observation y
         T {int} : length of observation y
@@ -641,7 +654,13 @@ class Kalman_Filter(object) :
                     res2 += self.V_RTS[t] + np.outer(self.x_RTS[t], self.x_RTS[t])
 
             # observation_matrices (H) を更新
-            self.H = np.dot(res1, linalg.pinv(res2))
+            if 'observation_matrices' not in em_dics.keys():
+                self.H = np.dot(res1, linalg.pinv(res2))
+            else:
+                # fixed parameter がある場合は固定をつける
+                tmp = self.H
+                self.H = np.dot(res1, linalg.pinv(res2))
+                self.H[em_dics['observation_matrices']] = tmp[em_dics['observation_matrices']]
 
 
         # 次に observation_covariance を更新
@@ -668,11 +687,18 @@ class Kalman_Filter(object) :
                     res += np.outer(err, err) + np.dot(H, np.dot(self.V_RTS[t], H.T))
                     n_obs += 1
             
+            # temporary
+            tmp = self.R
+
             # 観測が1回でも確認できた場合
             if n_obs > 0:
                 self.R = (1.0 / n_obs) * res
             else:
                 self.R = res
+
+            # fiexd parameter の有無
+            if 'observation_covariance' in em_dics.keys():
+                self.R[em_dics['observation_covariance']] = tmp[em_dics['observation_covariance']]
 
 
         # 次に transition_matrices の更新
@@ -694,7 +720,12 @@ class Kalman_Filter(object) :
                 res1 -= np.outer(b, self.x_RTS[t - 1])            
                 res2 += self.V_RTS[t - 1] + np.outer(self.x_RTS[t - 1], self.x_RTS[t - 1])
 
+            tmp = self.F
             self.F = np.dot(res1, linalg.pinv(res2))
+
+            # fixed parameter
+            if 'transition_matrices' in em_dics.keys():
+                self.F[em_dics['transition_matrices']] = tmp[em_dics['transition_matrices']]
 
 
         # 次に transition_covariance の更新
@@ -725,7 +756,15 @@ class Kalman_Filter(object) :
                     - Vt1t_F - Vt1t_F.T
                 )
 
-            self.Q = (1.0 / (T - 1)) * res
+            #tmp = self.Q
+            #self.Q = (1.0 / (T - 1)) * res
+            Q = (1.0 / (T - 1)) * res
+
+            # fiexed paramter
+            if 'transition_covariance' in em_dics.keys():
+                Q[em_dics['transition_covariance']] = self.Q[em_dics['transition_covariance']]
+
+            self.Q = Q
 
 
         # 次に initial_mean の更新
@@ -734,7 +773,12 @@ class Kalman_Filter(object) :
             x_0 : system of t=0
                 \mu_0 = \mathbb{E}[x_0]
             '''
+            tmp = self.initial_mean
             self.initial_mean = self.x_RTS[0]
+
+            # fiexd paramter
+            if 'initial_mean' in em_dics.keys():
+                self.initial_mean[em_dics['initial_mean']] = tmp[em_dics['initial_mean']]
 
 
         # 次に initial_covariance の更新
@@ -746,8 +790,14 @@ class Kalman_Filter(object) :
             #self.initial_covariance = self.V_RTS[0] - np.outer(self.x_RTS[0], self.x_RTS[0])
             x0 = self.x_RTS[0]
             x0_x0 = self.V_RTS[0] + np.outer(x0, x0)
+
+            tmp = self.initial_covariance
             self.initial_covariance = x0_x0 - np.outer(self.initial_mean, x0)
             self.initial_covariance += - np.outer(x0, self.initial_mean) + np.outer(self.initial_mean, self.initial_mean)
+
+            # fixed paramter
+            if 'initial_covariance' in em_dics.keys():
+                self.initial_covariance[em_dics['initial_covariance']] = tmp[em_dics['initial_covariance']]
 
 
         # 次に transition_offsets の更新
@@ -758,6 +808,7 @@ class Kalman_Filter(object) :
                 b = \frac{1}{T-1} \sum_{t=1}^{T-1}
                         \mathbb{E}[x_t] - F_{t-1} \mathbb{E}[x_{t-1}]
             '''
+            tmp = self.b
             self.b = np.zeros(self.n_dim_sys)
 
             # 最低でも3点での値が必要
@@ -767,6 +818,10 @@ class Kalman_Filter(object) :
                     self.b += self.x_RTS[t] - np.dot(F, self.x_RTS[t - 1])
                 self.b *= (1.0 / (T - 1))
 
+            # fixed paramter
+            if 'transition_offsets' in em_dics.keys():
+                self.transition_offsets[em_dics['transition_offsets']] = tmp[em_dics['transition_offsets']]
+
 
         # 最後に observation_offsets の更新
         if 'observation_offsets' not in given:
@@ -775,6 +830,7 @@ class Kalman_Filter(object) :
             H_t : observation_matrices, x_t : system
                 d = \frac{1}{T} \sum_{t=0}^{T-1} y_t - H_{t} \mathbb{E}[x_{t}]
             '''
+            tmp = self.d
             self.d = np.zeros(self.n_dim_obs)
             n_obs = 0
             for t in range(T):
@@ -784,6 +840,10 @@ class Kalman_Filter(object) :
                     n_obs += 1
             if n_obs > 0:
                 self.d *= (1.0 / n_obs)
+
+            # fixed paramter
+            if 'observation_offsets' in em_dics.keys():
+                self.observation_offsets[em_dics['observation_offsets']] = tmp[em_dics['observation_offsets']]
 
 
 
