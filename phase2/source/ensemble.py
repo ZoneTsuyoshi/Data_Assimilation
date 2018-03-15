@@ -161,7 +161,7 @@ class Ensemble_Kalman_Filter(object):
 		self.x_pred_mean = np.zeros((T + 1, self.n_dim_sys))
 		self.x_pred_center = np.zeros((T + 1, n_particle, self.n_dim_sys))
 		self.x_pred_center_outer = np.zeros((n_particle, self.n_dim_sys, self.n_dim_sys))
-		self.V_pred = np.zeros((T + 1, self.n_dim_sys, self.n_dim_sys))
+		#self.V_pred = np.zeros((T + 1, self.n_dim_sys, self.n_dim_sys))
 		self.w_ensemble = np.zeros((T + 1, n_particle, self.n_dim_obs))
 
 		# n_particle が十分大きければ ensemble_mean, center を計算する必要性はない
@@ -170,7 +170,9 @@ class Ensemble_Kalman_Filter(object):
 
 		self.x_filt = np.zeros((T + 1, n_particle, self.n_dim_sys))
 		self.x_filt_mean = np.zeros((T + 1, self.n_dim_sys))
-		self.K = np.zeros((T + 1, self.n_dim_sys, self.n_dim_obs))
+		#self.K = np.zeros((T + 1, self.n_dim_sys, self.n_dim_obs))
+		self.Z = np.zeros((T + 1, n_particle, n_particle))
+
 
 		# 初期値のセッティング
 		self.x_pred[0] = self.initial_mean
@@ -196,34 +198,51 @@ class Ensemble_Kalman_Filter(object):
 		# x_pred_mean を計算
 		self.x_pred_mean[t + 1] = np.mean(self.x_pred[t + 1], axis = 0)
 
-		# x_pred_center を計算
-		self.x_pred_center[t + 1] = self.x_pred[t + 1] - self.x_pred_mean[t + 1]
-
-		# V_pred を計算
-		for i in range(n_particle):
-			self.x_pred_center_outer[i] = np.outer(self.x_pred_center[t + 1, i], self.x_pred_center[t + 1, i])
-
-		self.V_pred[t + 1] = np.mean(self.x_pred_center_outer, axis = 0) * (n_particle / (n_particle - 1))
-
-		# 観測ノイズのアンサンブルを発生
-		R = self._last_dims(self.R, t)
-		for i in range(n_particle):
-			self.w_ensemble[t + 1, i] = rd.multivariate_normal(np.zeros(self.n_dim_obs), R)
-
-		# カルマンゲインの計算
-		H = self._last_dims(self.H, t)
-		HVH_R = np.dot(H, np.dot(self.V_pred[t + 1], H.T)) + R
-		self.K[t + 1] = np.dot(self.V_pred[t + 1], np.dot(H.T, linalg.pinv(HVH_R)))
-
 		# 欠測値の対処
 		if np.any(np.ma.getmask(y[t])):
 			self.x_filt[t + 1] = self.x_pred[t + 1]
 		else:
+			# x_pred_center を計算
+			self.x_pred_center[t + 1] = self.x_pred[t + 1] - self.x_pred_mean[t + 1]
+
+			# 保留(使わない) : V_pred を計算
+			'''
+			for i in range(n_particle):
+				self.x_pred_center_outer[i] = np.outer(self.x_pred_center[t + 1, i], self.x_pred_center[t + 1, i])
+
+			self.V_pred[t + 1] = np.mean(self.x_pred_center_outer, axis = 0) * (n_particle / (n_particle - 1))
+			'''
+
+			# 観測ノイズのアンサンブルを発生
+			R = self._last_dims(self.R, t)
+			for i in range(n_particle):
+				self.w_ensemble[t + 1, i] = rd.multivariate_normal(np.zeros(self.n_dim_obs), R)
+
+			# カルマンゲインの計算
+			H = self._last_dims(self.H, t)
+			#HVH_R = np.dot(H, np.dot(self.V_pred[t + 1], H.T)) + R
+			HVH_R = np.dot(H, np.dot(self.x_pred_center[t + 1].T,
+				np.dot(self.x_pred_center[t + 1], H.T))) + R
+			'''保留 : 以前のコード
+			self.K[t + 1] = np.dot(self.V_pred[t + 1], np.dot(H.T, linalg.pinv(HVH_R)))
+			'''
+			Inovation = np.zeros((self.n_dim_obs, n_particle))
+			Inovation.T[:] = y[t]
+			Inovation += self.w_ensemble[t + 1].T - np.dot(H, self.x_pred[t + 1].T)
+			self.Z[t + 1] = np.eye(n_particle) + np.dot(
+				self.x_pred_center[t + 1],
+				np.dot(H.T, np.dot(linalg.pinv(HVH_R), Inovation))
+				)
+
 			# フィルタ分布のアンサンブルメンバーの計算
+			self.x_filt[t + 1] = np.dot(self.Z[t + 1].T, self.x_pred[t + 1])
+			#self.x_filt[t + 1] = np.dot(self.x_pred[t + 1].T, self.Z[t + 1]).T
+			'''保留 : 以前のコード
 			for i in range(n_particle):
 				self.x_filt[t + 1, i] = self.x_pred[t + 1, i] + np.dot(
 					self.K[t + 1], y[t] + self.w_ensemble[t + 1, i] - np.dot(H, self.x_pred[t + 1, i])
-					)
+					)'''
+					
 
 		# フィルタ分布のアンサンブル平均の計算
 		self.x_filt_mean[t + 1] = np.mean(self.x_filt[t + 1], axis = 0)
@@ -261,7 +280,7 @@ class Ensemble_Kalman_Filter(object):
 			raise ValueError('The dim must be less than ' + self.x_filt_mean.shape[1] + '.')
 
 
-	# smooth with filter
+	# fixed lag smooth with filter
 	def smooth(self, y = None, n_particle = None, lag = 10):
 		'''
 		lag {int} : smoothing lag
@@ -291,12 +310,12 @@ class Ensemble_Kalman_Filter(object):
 
 		# filter と同様の配列定義
 		self._filter_definition(T, n_particle)
-		Z = np.zeros(self.n_dim_sys)
+		#Z = np.zeros(self.n_dim_sys)
 		self.x_smooth = np.zeros((T + 1, n_particle, self.n_dim_sys))
 		self.x_smooth_mean = np.zeros((T + 1, self.n_dim_sys))
-		x_smooth_center = np.zeros((T + 1, n_particle, self.n_dim_sys))
-		x_smooth_center_outer = np.zeros((n_particle, self.n_dim_sys, self.n_dim_sys))
-		V_smooth = np.zeros((self.n_dim_sys, self.n_dim_sys))
+		#x_smooth_center = np.zeros((T + 1, n_particle, self.n_dim_sys))
+		#x_smooth_center_outer = np.zeros((n_particle, self.n_dim_sys, self.n_dim_sys))
+		#V_smooth = np.zeros((self.n_dim_sys, self.n_dim_sys))
 
 		# 初期値
 		self.x_smooth[0] = self.initial_mean
@@ -312,9 +331,11 @@ class Ensemble_Kalman_Filter(object):
 			# t+1 の初期 smooth 値
 			self.x_smooth[t + 1] = self.x_filt[t + 1]
 
+			''' 保留 : 以前のコード
 			R = self._last_dims(self.R, t)
 			H = self._last_dims(self.H, t)
 			HVH_R = np.dot(H, np.dot(self.V_pred[t + 1], H.T)) + R
+			'''
 
 			# 平滑化レンジの決定
 			if t < lag + 1:
@@ -325,8 +346,13 @@ class Ensemble_Kalman_Filter(object):
 			# 平滑化
 			if not np.any(np.ma.getmask(y[t])):
 				for s in s_range:
+					# 観測が得られたら，s_range 区間を t における観測で慣らす
+					self.x_smooth[s] = np.dot(self.Z[t + 1].T, self.x_smooth[s])
+					''' 保留 : 以前のコード
 					self.x_smooth_mean[s] = np.mean(self.x_smooth[s], axis = 0)
 					x_smooth_center[s] = self.x_smooth[s] - self.x_smooth_mean[s]
+
+					# particle ごとに外積を取るために for 分回しているが，できれば回したくない
 					for i in range(n_particle):
 						x_smooth_center_outer[i] = np.outer(x_smooth_center[s, i], self.x_pred_center[t + 1, i])
 					V_smooth = np.mean(x_smooth_center_outer, axis = 0) * (n_particle / (n_particle - 1))
@@ -340,6 +366,7 @@ class Ensemble_Kalman_Filter(object):
 								)
 							)
 						self.x_smooth[s, i] += Z
+						'''
 
 		# smooth_mean の計算
 		self.x_smooth_mean = np.mean(self.x_smooth, axis = 1)
