@@ -473,6 +473,8 @@ class Kalman_Filter(object) :
         # Actual EM iterations
         # EM algorithm の計算
         for i in range(n_iter):
+            print("EM calculating... i={}".format(i+1) + "/" + str(n_iter), end="")
+
             # E step
             self.filter(y)
             self.RTS_smooth(y)
