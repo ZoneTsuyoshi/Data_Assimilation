@@ -139,3 +139,7 @@ vignettes/*.pdf
 
 # Mac OS
 .DS_Store
+
+
+# old code
+old/
