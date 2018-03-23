@@ -1,7 +1,10 @@
 # ensemble kalman filter
 '''
-18.03.22
-- change evensen formulation
+18.03.17
+- y, n_particle are decided by class input
+- w_ensemble not save for each time
+- memory saving
+- dtype usage
 '''
 
 
@@ -34,7 +37,6 @@ class Ensemble_Kalman_Filter(object):
 	q, transition_noise [n_time - 1] {(method, parameters)}
 		: transition noise for v_t
 		システムノイズの発生方法とパラメータ [時間軸]
-		サイズは指定できる形式
 	R, observation_covariance [n_time, n_dim_obs, n_dim_obs] {numpy-array, float} 
 		: covariance of observation normal noise
 		観測正規ノイズの共分散行列 [時間軸，観測変数軸，観測変数軸]
@@ -116,15 +118,56 @@ class Ensemble_Kalman_Filter(object):
 		V_pred [n_time+1, n_dim_sys, n_dim_sys] {numpy-array, float}
 			: covariance of hidden state at time t given observations from times [0...t-1]
 			時刻 t における状態変数の予測共分散 [時間軸，状態変数軸，状態変数軸]
-		x_filt [n_time+1, n_particle, n_dim_sys] {numpy-array, float}
-			: hidden state at time t given observations for each particle
-			状態変数のフィルタアンサンブル [時間軸，粒子軸，状態変数軸]
 		x_filt_mean [n_time+1, n_dim_sys] {numpy-array, float}
 			: mean of x_filt regarding to particles
 			時刻 t における状態変数のフィルタ平均 [時間軸，状態変数軸]
-		X5 [n_time, n_dim_sys, n_dim_obs] {numpy-array, float}
+		x_filt [n_time+1, n_particle, n_dim_sys] {numpy-array, float}
+			: hidden state at time t given observations for each particle
+			状態変数のフィルタアンサンブル [時間軸，粒子軸，状態変数軸]
+		Z [n_time, n_dim_sys, n_dim_obs] {numpy-array, float}
 			: right operator for filter, smooth calulation
 			filter, smoothing 計算で用いる各時刻の右作用行列
+		K [n_time+1, n_dim_sys, n_dim_obs] {numpy-array, float}
+			: Kalman gain matrix for time t [時間軸，状態変数軸，観測変数軸]
+			各時刻のカルマンゲイン
+		'''
+
+		# 時系列の長さ, lenght of time-series
+		T = self.y.shape[0]
+
+		# 配列定義, definition of array
+		self._filter_definition(T)
+
+		# 各時刻で予測・フィルタ計算, prediction and filtering
+		for t in range(T):
+			# 計算している時間を可視化, visualization for calculation
+			print("\r filter calculating... t={}".format(t+1) + "/" + str(T), end="")
+
+			# filter update
+			self._filter_update(t)
+
+
+	# filter definition
+	# smooth でも使うため，関数化しておく
+	def _filter_definition(self, T):
+		# 時刻0における予測・フィルタリングは初期値, initial setting
+		self.x_pred_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
+		self.x_filt_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
+		self.x_filt = np.zeros((T + 1, self.n_particle, self.n_dim_sys), dtype = self.dtype)
+		self.Z = np.zeros((T + 1, self.n_particle, self.n_particle), dtype = self.dtype)
+
+		# 初期値のセッティング, initial setting
+		self.x_pred_mean[0] = self.initial_mean
+		self.x_filt_mean[0] = self.initial_mean
+		self.x_filt[0, :] = self.initial_mean
+
+
+	# filter update
+	# smooth でも使うため，関数化しておく
+	def _filter_update(self, t, return_filt = False):
+		'''
+		t {int} : time
+		return_filt {boolean} : if True, return x_filt
 
 		x_pred [n_particle, n_dim_sys] {numpy-array, float}
 			: hidden state at time t given observations for each particle
@@ -139,22 +182,8 @@ class Ensemble_Kalman_Filter(object):
 			: Inovation from observation [観測変数軸，粒子軸]
 			観測と予測のイノベーション
 		'''
-
-		# 時系列の長さ, lenght of time-series
-		T = self.y.shape[0]
-
-		## 配列定義, definition of array
-		# 時刻0における予測・フィルタリングは初期値, initial setting
-		self.x_pred_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-		self.x_filt = np.zeros((T + 1, self.n_particle, self.n_dim_sys), dtype = self.dtype)
-		self.x_filt[0, :] = self.initial_mean
-		self.x_filt_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-		self.X5 = np.zeros((T + 1, self.n_particle, self.n_particle), dtype = self.dtype)
-		self.X5[:] = np.eye(self.n_particle, dtype = self.dtype)
-
-		# 初期値のセッティング, initial setting
-		self.x_pred_mean[0] = self.initial_mean
-		self.x_filt_mean[0] = self.initial_mean
+		# 時系列の長さ
+		T = self.y[t].shape[0]
 
 		# initial setting
 		x_pred = np.zeros((self.n_particle, self.n_dim_sys), dtype = self.dtype)
@@ -164,58 +193,57 @@ class Ensemble_Kalman_Filter(object):
 		# イノベーション, observation inovation
 		Inovation = np.zeros((self.n_dim_obs, self.n_particle), dtype = self.dtype)
 
-		# 各時刻で予測・フィルタ計算, prediction and filtering
-		for t in range(T):
-			# 計算している時間を可視化, visualization for calculation
-			print("\r filter calculating... t={}".format(t+1) + "/" + str(T), end="")
+		# 一期先予測, prediction
+		f = self._last_dims(self.f, t, 1)[0]
 
-			## filter update
-			# 一期先予測, prediction
-			f = self._last_dims(self.f, t, 1)[0]
-
-			# システムノイズをパラメトリックに発生, raise parametric system noise
-			v = self.q[0](*self.q[1], size = self.n_particle)
+		# システムノイズをパラメトリックに発生, raise parametric system noise
+		# 他に方法ないか模索したい．for 分回したくない
+		#v = np.zeros((self.n_particle, self.n_dim_sys))
+		for i in range(self.n_particle):
+			#v[i] = self.q[0](*self.q[1])
+			v = self.q[0](*self.q[1])
 
 			# アンサンブル予測, ensemble prediction
-			x_pred = f(*np.transpose([self.x_filt[t], v], (0, 2, 1))).T
+			x_pred[i] = f(self.x_filt[t, i], v)
+		#x_pred = f(*np.transpose([x_filt, v], (0, 2, 1))).T
 
 
-			# x_pred_mean を計算, calculate x_pred_mean
-			self.x_pred_mean[t + 1] = np.mean(x_pred, axis = 0)
+		# x_pred_mean を計算, calculate x_pred_mean
+		self.x_pred_mean[t + 1] = np.mean(x_pred, axis = 0)
 
-			# 欠測値の対処, treat missing values
-			if np.any(np.ma.getmask(self.y[t])):
-				self.x_filt[t + 1] = x_pred
-			else:
-				# x_pred_center を計算, calculate x_pred_center
-				x_pred_center = x_pred - self.x_pred_mean[t + 1]
+		# 欠測値の対処, treat missing values
+		if np.any(np.ma.getmask(self.y[t])):
+			self.x_filt[t + 1] = x_pred
+		else:
+			# x_pred_center を計算, calculate x_pred_center
+			x_pred_center = x_pred - self.x_pred_mean[t + 1]
 
-				# 観測ノイズのアンサンブルを発生, raise observation noise ensemble
-				R = self._last_dims(self.R, t)
-				w_ensemble = rd.multivariate_normal(np.zeros(self.n_dim_obs), R,
-					size = self.n_particle)
+			# 観測ノイズのアンサンブルを発生, raise observation noise ensemble
+			R = self._last_dims(self.R, t)
+			w_ensemble = rd.multivariate_normal(np.zeros(self.n_dim_obs), R,
+				size = self.n_particle)
 
-				# イノベーションの計算
-				H = self._last_dims(self.H, t)
-				Inovation.T[:] = self.y[t]
-				Inovation += w_ensemble.T - H @ x_pred.T
+			# 右作用行列の計算
+			H = self._last_dims(self.H, t)
+			HVH_R = np.dot(H, np.dot(x_pred_center.T,
+				np.dot(x_pred_center, H.T))) + R
+			
+			Inovation.T[:] = self.y[t]
+			Inovation += w_ensemble.T - np.dot(H, x_pred.T)
+			self.Z[t + 1] = np.eye(self.n_particle) + np.dot(
+				x_pred_center,
+				np.dot(H.T, np.dot(linalg.pinv(HVH_R), Inovation))
+				)
 
-				# 特異値分解
-				#U, s, _ = linalg.svd(H @ x_pred_center.T @ x_pred_center @ H.T + R, False)
-				U, s, _ = linalg.svd(H @ x_pred_center.T + w_ensemble.T, False)
+			# フィルタ分布のアンサンブルメンバーの計算
+			self.x_filt[t + 1] = np.dot(self.Z[t + 1].T, x_pred)
 
-				# 右作用行列の計算
-				X1 = np.diag(1 / (s * s)) @ U.T
-				X2 = X1 @ Inovation
-				X3 = U @ X2
-				X4 = (H @ x_pred_center.T).T @ X3
-				self.X5[t + 1] = np.eye(self.n_particle, dtype = self.dtype) + X4
+		# フィルタ分布のアンサンブル平均の計算
+		self.x_filt_mean[t + 1] = np.mean(x_filt, axis = 1)
 
-				# フィルタ分布のアンサンブルメンバーの計算
-				self.x_filt[t + 1] = self.X5[t + 1].T @ x_pred
-
-			# フィルタ分布のアンサンブル平均の計算
-			self.x_filt_mean[t + 1] = np.mean(self.x_filt[t + 1], axis = 0)
+		# return_filt
+		if return_filt:
+			return x_filt
 
 
 	# get predicted value (一期先予測値を返す関数, Filter 関数後に値を得たい時)
@@ -268,8 +296,9 @@ class Ensemble_Kalman_Filter(object):
 		# 時系列の長さ
 		T = self.y.shape[0]
 
-		# 配列定義
-		x_smooth = np.zeros((self.n_particle, self.n_dim_sys), dtype = self.dtype)
+		# filter と同様の配列定義
+		self._filter_definition(T)
+		x_smooth = np.zeros((T + 1, self.n_particle, self.n_dim_sys), dtype = self.dtype)
 		self.x_smooth_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
 
 		# 初期値
@@ -279,19 +308,24 @@ class Ensemble_Kalman_Filter(object):
 		for t in range(T):
 			# 計算している時間を可視化
 			print("\r smooth calculating... t={}".format(t+1) + "/" + str(T), end="")
-			x_smooth = self.x_filt[t]
+
+			# filter, t+1 の初期 smooth 値
+			x_smooth[t + 1] = self._filter_update(t, True)
 
 			# 平滑化レンジの決定
-			if t > T - lag:
-				s_range = range(t + 1, T + 1)
+			if t < lag + 1:
+				s_range = range(1, t + 1)
 			else:
-				s_range = range(t + 1, t + lag + 1)
+				s_range = range(t-lag, t + 1)
 
-			for s in s_range:
-				x_smooth = self.X5[s] @ x_smooth
-			
-			# smooth_mean の計算
-			self.x_smooth_mean[t] = np.mean(x_smooth, axis = 0)
+			# 平滑化
+			if not np.any(np.ma.getmask(self.y[t])):
+				for s in s_range:
+					# 観測が得られたら，s_range 区間を t における観測で慣らす
+					x_smooth[s] = np.dot(self.Z[t + 1].T, x_smooth[s])
+
+		# smooth_mean の計算
+		self.x_smooth_mean = np.mean(x_smooth, axis = 1)
 
 
 	# get smoothed value
