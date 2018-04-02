@@ -1,17 +1,7 @@
-# ensemble kalman filter
+# local ensemble transform kalman filter
 '''
-18.03.22
-- change evensen formulation
-18.03.26
-- add truncated svd
-	- if you use truncated svd,
-	n_dim_obs must be > n_particle
-18.03.27
-- add pypropack svdp
-	- if you use this,
-	you must install pypropack (https://github.com/jakevdp/pypropack)
-	- before install pypropack, you must install gfortran or gcc,
-	because pypropack wrap fortran source.
+18.04.02
+- ローカルへの変換は隣接行列として実装
 '''
 
 
@@ -28,9 +18,9 @@ from utils import array1d, array2d, check_random_state, get_params, \
 	preprocess_arguments, check_random_state
 
 
-class Ensemble_Kalman_Filter(object):
+class Local_Ensemble_Transform_Kalman_Filter(object):
 	'''
-	Ensemble Kalman Filter のクラス
+	Local Ensemble Transform Kalman Filter のクラス
 
 	<Input Variables>
 	y, observation [n_time, n_dim_obs] {numpy-array, float}
@@ -42,9 +32,9 @@ class Ensemble_Kalman_Filter(object):
 	f, transition_functions [n_time] {function}
 		: transition function from x_{t-1} to x_t
 		システムモデルの遷移関数 [時間軸] or []
-	H, observation_matrices [n_time, n_dim_sys, n_dim_obs] {function}
-		: observation matrices from x_t to y_t
-		観測行列 [時間軸，状態変数軸，観測変数軸] or [状態変数軸，観測変数軸]
+	h, observation_functions [n_time] {function}
+		: observation function from x_t to y_t
+		観測関数 [時間軸] or []
 	q, transition_noise [n_time - 1] {(method, parameters)}
 		: transition noise for v_t
 		システムノイズの発生方法とパラメータ [時間軸]
@@ -52,17 +42,25 @@ class Ensemble_Kalman_Filter(object):
 	R, observation_covariance [n_time, n_dim_obs, n_dim_obs] {numpy-array, float} 
 		: covariance of observation normal noise
 		観測正規ノイズの共分散行列 [時間軸，観測変数軸，観測変数軸]
+	A_sys, system_adjacency_matrix [n_dim_sys, n_dim_sys] {numpy-array, int}
+		: adjacency matrix of system variables
+		システム変数の隣接行列 [状態変数軸，状態変数軸]
+	A_obs, observation_adjacency_matrix [n_dim_obs, n_dim_obs] {numpy-array, int}
+		: adjacency matrix of system variables
+		観測変数の隣接行列 [観測変数軸，観測変数軸]
+	rho {float} : multipliative covariance inflating factor
 	n_particle {int} : number of particles (粒子数)
 	n_dim_sys {int} : dimension of system variable （システム変数の次元）
 	n_dim_obs {int} : dimension of observation variable （観測変数の次元）
-	n_iter {int} : iteration number of randomized truncated SVD (TruncatedSVD のイテレーション数)
 	dtype {np.dtype} : numpy dtype (numpy のデータ型)
 	seed {int} : random seed (ランダムシード)
 	'''
 
 	def __init__(self, observation = None, transition_functions = None,
-				observation_matrices = None, initial_mean = None,
+				observation_functions = None, initial_mean = None,
 				transition_noise = None, observation_covariance = None,
+				system_adjacency_matrix = None, observation_adjacency_matrix = None,
+				rho = 1,
 				n_particle = 100, n_dim_sys = None, n_dim_obs = None,
 				dtype = np.float32, seed = 10) :
 
@@ -76,7 +74,7 @@ class Ensemble_Kalman_Filter(object):
 		)
 
 		self.n_dim_obs = self._determine_dimensionality(
-			[(observation_covariance, array2d, -2)],
+			[(observation, array1d, -1)],
 			n_dim_obs
 		)
 
@@ -89,10 +87,10 @@ class Ensemble_Kalman_Filter(object):
 
 		# observation_matrices
 		# None -> np.eye
-		if observation_matrices is None:
-			self.H = np.eye(self.n_dim_obs, self.n_dim_sys, dtype = dtype)
+		if observation_functions is None:
+			self.h = [lambda x : x]
 		else:
-			self.H = observation_matrices.astype(dtype)
+			self.h = observation_functions
 
 		# transition_noise
 		# None -> standard normal distribution
@@ -116,6 +114,19 @@ class Ensemble_Kalman_Filter(object):
 		else:
 			self.initial_mean = initial_mean.astype(dtype)
 
+		# system_adjacency_matrix None -> np.eye
+		if system_adjacency_matrix is None:
+			self.A_sys = np.eye(self.n_dim_sys).astype(bool)
+		else:
+			self.A_sys = system_adjacency_matrix.astype(bool)
+
+		# observation_adjacency_matrix is None -> np.eye
+		if observation_adjacency_matrix is None:
+			self.A_obs = np.eye(self.n_dim_obs).astype(bool)
+		else:
+			self.A_obs = observation_adjacency_matrix.astype(bool)
+
+		self.rho = rho
 		self.n_particle = n_particle
 		np.random.seed(seed)
 		self.seed = seed
@@ -162,20 +173,13 @@ class Ensemble_Kalman_Filter(object):
 		## 配列定義, definition of array
 		# 時刻0における予測・フィルタリングは初期値, initial setting
 		self.x_pred_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-		self.x_filt = np.zeros((T + 1, self.n_particle, self.n_dim_sys), dtype = self.dtype)
-		self.x_filt[0, :] = self.initial_mean
+		self.x_filt = np.zeros((T + 1, self.n_dim_sys, self.n_particle), dtype = self.dtype)
+		self.x_filt[0].T[:] = self.initial_mean
 		self.x_filt_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-		self.X5 = np.zeros((T + 1, self.n_particle, self.n_particle), dtype = self.dtype)
-		self.X5[:] = np.eye(self.n_particle, dtype = self.dtype)
 
 		# 初期値のセッティング, initial setting
 		self.x_pred_mean[0] = self.initial_mean
 		self.x_filt_mean[0] = self.initial_mean
-
-		# initial setting
-		x_pred = np.zeros((self.n_particle, self.n_dim_sys), dtype = self.dtype)
-		x_pred_center = np.zeros((T + 1, self.n_particle, self.n_dim_sys), dtype = self.dtype)
-		w_ensemble = np.zeros((self.n_particle, self.n_dim_obs), dtype = self.dtype)
 
 		# イノベーション, observation inovation
 		Inovation = np.zeros((self.n_dim_obs, self.n_particle), dtype = self.dtype)
@@ -190,47 +194,112 @@ class Ensemble_Kalman_Filter(object):
 			f = self._last_dims(self.f, t, 1)[0]
 
 			# システムノイズをパラメトリックに発生, raise parametric system noise
-			v = self.q[0](*self.q[1], size = self.n_particle)
+			# sys x particle
+			v = self.q[0](*self.q[1], size = self.n_particle).T
 
 			# アンサンブル予測, ensemble prediction
-			x_pred = f(*np.transpose([self.x_filt[t], v], (0, 2, 1))).T
-
+			# sys x particle
+			x_pred = f(*[self.x_filt[t], v])
 
 			# x_pred_mean を計算, calculate x_pred_mean
-			self.x_pred_mean[t + 1] = np.mean(x_pred, axis = 0)
+			# time x sys
+			self.x_pred_mean[t + 1] = np.mean(x_pred, axis = 1)
 
 			# 欠測値の対処, treat missing values
 			if np.any(np.ma.getmask(self.y[t])):
+				# time x sys x particle
 				self.x_filt[t + 1] = x_pred
 			else:
-				# x_pred_center を計算, calculate x_pred_center
-				x_pred_center = x_pred - self.x_pred_mean[t + 1]
-
-				# 観測ノイズのアンサンブルを発生, raise observation noise ensemble
+				## Step1 : model space -> observation space
+				h = self._last_dims(self.h, t, 1)[0]
 				R = self._last_dims(self.R, t)
-				w_ensemble = rd.multivariate_normal(np.zeros(self.n_dim_obs), R,
-					size = self.n_particle)
 
-				# イノベーションの計算
-				H = self._last_dims(self.H, t)
-				Inovation.T[:] = self.y[t]
-				Inovation += w_ensemble.T - H @ x_pred.T
+				# y_background : obs x particle
+				y_background = h(x_pred)
 
-				# 特異値分解
-				U, s, _ = linalg.svd(H @ x_pred_center.T + w_ensemble.T, False)
+				# y_background mean : obs
+				y_background_mean = np.mean(y_background, axis = 1)
 
-				# 右作用行列の計算
-				X1 = np.diag(1 / (s * s)) @ U.T
-				X2 = X1 @ Inovation
-				X3 = U @ X2
-				X4 = (H @ x_pred_center.T).T @ X3
-				self.X5[t + 1] = np.eye(self.n_particle, dtype = self.dtype) + X4
+				# y_background center : obs x particle
+				y_background_center = (y_background.T - y_background_mean).T
 
-				# フィルタ分布のアンサンブルメンバーの計算
-				self.x_filt[t + 1] = self.X5[t + 1].T @ x_pred
+
+				## Step2 : calculate for model space
+				# x_pred_center : sys x particle
+				x_pred_center = (x_pred.T - self.x_pred_mean[t + 1]).T
+
+
+				# 先ずは素朴に各 grid point に関して行う方法でコードを書く
+				for i in range(self.n_dim_sys):
+					## Step3 : select data for grid point
+					# now, we select surrounding points for each data
+					# local_sys
+					x_pred_mean_local = self.x_pred_mean[t, self.A_sys[i]]
+
+					# local_sys x particle
+					x_pred_center_local = x_pred_center[self.A_sys[i]]
+
+					# local_obs
+					y_background_mean_local = y_background_mean[self.A_obs[i]]
+
+					# local_obs x particle
+					y_background_center_local = y_background_center[self.A_obs[i]]
+
+					# local_obs
+					y_local = self.y[t, self.A_obs[i]]
+
+					# local_obs x local_obs
+					R_local = R[self.A_obs[i]][:, self.A_obs[i]]
+
+
+					## Step4 : calculate matrix C
+					# R はここでしか使わないので，線型方程式 R C^T=Y を解く方が速いかもしれない
+					# R が時不変なら毎回逆行列計算するコスト抑制をしても良い
+					# particle x local_obs
+					C = y_background_center_local.T @ linalg.pinv(R_local)
+
+
+					## Step5 : calculate analysis error covariance in ensemble space
+					# particle x particle
+					analysis_error_covariance = linalg.pinv(
+						(self.n_particle - 1) / self.rho * np.eye(self.n_particle) \
+						+ C @ y_background_center_local
+						)
+
+
+					## Step6 : calculate analysis weight matrix in ensemble space
+					# particle x particle
+					analysis_weight_matrix = linalg.sqrtm(
+						(self.n_particle - 1) * analysis_error_covariance
+						)
+
+
+					# Step7 : calculate analysis weight ensemble
+					# particle
+					analysis_weight_mean = analysis_error_covariance @ C @ (
+						(y_local - y_background_center_local.T).T
+						)
+
+					# analysis_weight_matrix が対称なら転置とる必要がなくなる
+					# particle x particle
+					analysis_weight_ensemble = (analysis_weight_matrix.T + analysis_weight_mean).T
+
+
+					## Step8 : calculate analysis system variable in model space
+					# 転置が多くて少し気持ち悪い
+					# local_sys x particle
+					analysis_system = (x_pred_mean_local + (
+						x_pred_center_local @ analysis_weight_ensemble
+						).T).T
+
+
+					## Step9 : move analysis result to global analysis
+					# time x sys x particle
+					self.x_filt[t + 1, i] = analysis_system[len(np.where(self.A_sys[i, :i])[0])]
+
 
 			# フィルタ分布のアンサンブル平均の計算
-			self.x_filt_mean[t + 1] = np.mean(self.x_filt[t + 1], axis = 0)
+			self.x_filt_mean[t + 1] = np.mean(self.x_filt[t + 1], axis = 1)
 
 
 	# get predicted value (一期先予測値を返す関数, Filter 関数後に値を得たい時)
@@ -263,66 +332,6 @@ class Ensemble_Kalman_Filter(object):
 			return self.x_filt_mean[1:, int(dim)]
 		else:
 			raise ValueError('The dim must be less than ' + self.x_filt_mean.shape[1] + '.')
-
-
-	# fixed lag smooth with filter
-	def smooth(self, lag = 10):
-		'''
-		lag {int} : smoothing lag
-		x_smooth [n_time+1, n_particle, n_dim_sys] {numpy-array, float}
-			: hidden state at time s given observations from times [0...t] for each particle
-			時刻 s における状態変数の平滑化値 [時間軸，粒子軸，状態変数軸]
-		x_smooth_mean [n_time+1, n_dim_sys] {numpy-array, float}
-			: mean of x_smooth
-			時刻 s における平滑化 x_smooth の平均値
-		V_smooth [n_dim_sys, n_dim_sys] {numpy-array, float}
-			: covariance of hidden state at time s given observations from times [0...t]
-			時刻 s における状態変数の予測共分散 [時間軸，状態変数軸，状態変数軸]
-		'''
-
-		# 時系列の長さ
-		T = self.y.shape[0]
-
-		# 配列定義
-		x_smooth = np.zeros((self.n_particle, self.n_dim_sys), dtype = self.dtype)
-		self.x_smooth_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-
-		# 初期値
-		x_smooth[0] = self.initial_mean
-		self.x_smooth_mean[0] = self.initial_mean
-
-		for t in range(T + 1):
-			# 計算している時間を可視化
-			print("\r smooth calculating... t={}".format(t+1) + "/" + str(T), end="")
-			x_smooth = self.x_filt[t]
-
-			# 平滑化レンジの決定
-			if t > T - lag:
-				s_range = range(t + 1, T + 1)
-			else:
-				s_range = range(t + 1, t + lag + 1)
-
-			for s in s_range:
-				x_smooth = self.X5[s] @ x_smooth
-			
-			# smooth_mean の計算
-			self.x_smooth_mean[t] = np.mean(x_smooth, axis = 0)
-
-
-	# get smoothed value
-	def get_smoothed_value(self, dim = None) :
-		# smooth されてなければ実行
-		try :
-			self.x_smooth_mean[0]
-		except :
-			self.smooth()
-
-		if dim is None:
-			return self.x_smooth_mean[1:]
-		elif dim <= self.x_smooth_mean.shape[1]:
-			return self.x_smooth_mean[1:, int(dim)]
-		else:
-			raise ValueError('The dim must be less than ' + self.x_smooth_mean.shape[1] + '.')
 
 
 	# parse observations (観測変数の次元チェック，マスク処理)

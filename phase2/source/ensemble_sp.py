@@ -22,8 +22,10 @@ import numpy as np
 import numpy.random as rd
 import pandas as pd
 
-from scipy import linalg
+from scipy import linalg, sparse
+from sklearn.decomposition import TruncatedSVD
 
+from pypropack import svdp
 from utils import array1d, array2d, check_random_state, get_params, \
 	preprocess_arguments, check_random_state
 
@@ -55,6 +57,15 @@ class Ensemble_Kalman_Filter(object):
 	n_particle {int} : number of particles (粒子数)
 	n_dim_sys {int} : dimension of system variable （システム変数の次元）
 	n_dim_obs {int} : dimension of observation variable （観測変数の次元）
+	svd_type {string} : svd type (SVDの指定)
+		'linalg' : scipy.linalg.svd
+		'truncated' : sklearn.decomposition.TruncatedSVD
+		'propack' : pypropack.svdp
+		'sparse' : scipy.sparse.linalg.svds
+	svd_function {function} : svd function (SVDを実行する関数)
+	truncated_algorithm {string} : algorithm for truncated SVD (TruncateSVD のアルゴリズム)
+		'randomized' : randomized algorithm due to Halko (2009)
+		'arpack' : ARPACK wrapper in SciPy (scipy.sparse.linalg.svds)
 	n_iter {int} : iteration number of randomized truncated SVD (TruncatedSVD のイテレーション数)
 	dtype {np.dtype} : numpy dtype (numpy のデータ型)
 	seed {int} : random seed (ランダムシード)
@@ -64,6 +75,7 @@ class Ensemble_Kalman_Filter(object):
 				observation_matrices = None, initial_mean = None,
 				transition_noise = None, observation_covariance = None,
 				n_particle = 100, n_dim_sys = None, n_dim_obs = None,
+				svd_type = 'linalg', truncated_algorithm = 'randomized', n_iter = 10,
 				dtype = np.float32, seed = 10) :
 
 		# 次元数をチェック，欠測値のマスク処理
@@ -120,6 +132,9 @@ class Ensemble_Kalman_Filter(object):
 		np.random.seed(seed)
 		self.seed = seed
 		self.dtype = dtype
+
+		# SVD type
+		self.svd_function = self._determine_svd_function(svd_type, n_iter, truncated_algorithm)
 
 
 	# filtering step
@@ -217,7 +232,7 @@ class Ensemble_Kalman_Filter(object):
 				Inovation += w_ensemble.T - H @ x_pred.T
 
 				# 特異値分解
-				U, s, _ = linalg.svd(H @ x_pred_center.T + w_ensemble.T, False)
+				U, s = self.svd_function(H @ x_pred_center.T + w_ensemble.T)
 
 				# 右作用行列の計算
 				X1 = np.diag(1 / (s * s)) @ U.T
@@ -388,6 +403,36 @@ class Ensemble_Kalman_Filter(object):
 					"Please re-check their values."
 				)
 			return candidates[0]
+
+
+	# determine svd function (SVD方法決定関数)
+	def _determine_svd_function(self, svd_type, n_iter, truncated_algorithm):
+		if svd_type == 'linalg':
+			return lambda x : linalg.svd(x, False)[:2]
+		elif svd_type == 'sparse':
+			return lambda x : sparse.linalg.svds(x, np.min(x.shape)-1)[:2]
+		elif svd_type == 'truncated':
+			if truncated_algorithm == 'arpack':
+				return lambda x : self._calc_truncated_svd(x, n_iter,
+					truncated_algorithm, np.min(x.shape)-1)
+			elif self.n_particle < self.n_dim_obs:
+				return lambda x : self._calc_truncated_svd(x, n_iter,
+					truncated_algorithm, np.min(x.shape))
+			else:
+				raise ValueError('TruncatedSVD only use in the case of' + 
+					'n_particle < n_dim_obs.')
+		elif svd_type == 'propack':
+			return lambda x : svdp(x, k = np.min([self.n_particle, self.n_dim_obs]))[:2]
+		else:
+			raise ValueError('you must check svd type.')
+
+
+	# calculate truncated svd function (truncated svd 計算関数)
+	def _calc_truncated_svd(self, x, n_iter, truncated_algorithm, n_components):
+		tSVD = TruncatedSVD(n_components = n_components, algorithm = truncated_algorithm,
+					random_state = self.seed, n_iter = n_iter)
+		tSVD.fit_transform(x.T)
+		return tSVD.components_.T, tSVD.singular_values_
 
 
 	# last dim (各時刻におけるパラメータを決定する関数)
