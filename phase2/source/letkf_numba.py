@@ -2,9 +2,8 @@
 '''
 18.04.02
 - ローカルへの変換は隣接行列として実装
-18.04.06
-- multiprocessing による並列化処理
-　心なしかあまり早くなった気がしない
+18.04.07
+- numba の導入
 '''
 
 
@@ -17,74 +16,90 @@ import numpy.random as rd
 import pandas as pd
 
 from scipy import linalg
-
-from multiprocessing import Pool
-import multiprocessing as multi
+from numba import jit
 
 from utils import array1d, array2d, check_random_state, get_params, \
 	preprocess_arguments, check_random_state
 
 
-# map global to local
-def global_to_local(adjacency_matrix, global_variable):
+@jit
+def _local_calculation(x_pred_mean_t, x_pred_center, y_background_mean,
+		y_background_center, y_t, R, A_sys, A_obs, n_dim_sys, n_particle, rho):
 	'''
-	adjacency_matrix [n_dim] {numpy-array, float}
-		: adjacency matrix from global to local
-		大域変数を局所変数に写像するための隣接行列
-	global_variable [n_dim] {numpy-array, float}
-		: global variable
-		大域変数
+	local calculation function which uses numba
 	'''
-	return global_variable[adjacency_matrix]
+	# n_dim_sys x n_particle
+	x_filt = np.zeros((n_dim_sys, n_particle))
+
+	# 先ずは素朴に各 grid point に関して行う方法でコードを書く
+	for i in range(n_dim_sys):
+		## Step3 : select data for grid point
+		# now, we select surrounding points for each data
+		# local_sys
+		x_pred_mean_local = x_pred_mean_t[A_sys[i]]
+
+		# local_sys x particle
+		x_pred_center_local = x_pred_center[A_sys[i]]
+
+		# local_obs
+		y_background_mean_local = y_background_mean[A_obs[i]]
+
+		# local_obs x particle
+		y_background_center_local = y_background_center[A_obs[i]]
+
+		# local_obs
+		y_local = y_t[A_obs[i]]
+
+		# local_obs x local_obs
+		R_local = R[A_obs[i]][:, A_obs[i]]
 
 
-# parallel processing for local calculation
-def local_multi_processing(x_pred_mean_local, x_pred_center_local, y_background_mean_local,
-		y_background_center_local, y_local, R_local, i, A_sys, n_particle, rho):
-	## Step4 : calculate matrix C
-	# R はここでしか使わないので，線型方程式 R C^T=Y を解く方が速いかもしれない
-	# R が時不変なら毎回逆行列計算するコスト抑制をしても良い
-	# particle x local_obs
-	C = y_background_center_local.T @ linalg.pinv(R_local)
+		## Step4 : calculate matrix C
+		# R はここでしか使わないので，線型方程式 R C^T=Y を解く方が速いかもしれない
+		# R が時不変なら毎回逆行列計算するコスト抑制をしても良い
+		# particle x local_obs
+		C = y_background_center_local.T @ linalg.pinv(R_local)
 
 
-	## Step5 : calculate analysis error covariance in ensemble space
-	# particle x particle
-	analysis_error_covariance = linalg.pinv(
-		(n_particle - 1) / rho * np.eye(n_particle) \
-		+ C @ y_background_center_local
-		)
+		## Step5 : calculate analysis error covariance in ensemble space
+		# particle x particle
+		analysis_error_covariance = linalg.pinv(
+			(n_particle - 1) / rho * np.eye(n_particle) \
+			+ C @ y_background_center_local
+			)
 
 
-	## Step6 : calculate analysis weight matrix in ensemble space
-	# particle x particle
-	analysis_weight_matrix = linalg.sqrtm(
-		(n_particle - 1) * analysis_error_covariance
-		)
+		## Step6 : calculate analysis weight matrix in ensemble space
+		# particle x particle
+		analysis_weight_matrix = linalg.sqrtm(
+			(n_particle - 1) * analysis_error_covariance
+			)
 
 
-	# Step7 : calculate analysis weight ensemble
-	# particle
-	analysis_weight_mean = analysis_error_covariance @ C @ (
-		(y_local - y_background_center_local.T).T
-		)
+		# Step7 : calculate analysis weight ensemble
+		# particle
+		analysis_weight_mean = analysis_error_covariance @ C @ (
+			(y_local - y_background_center_local.T).T
+			)
 
-	# analysis_weight_matrix が対称なら転置とる必要がなくなる
-	# particle x particle
-	analysis_weight_ensemble = (analysis_weight_matrix.T + analysis_weight_mean).T
-
-
-	## Step8 : calculate analysis system variable in model space
-	# 転置が多くて少し気持ち悪い
-	# local_sys x particle
-	analysis_system = (x_pred_mean_local + (
-		x_pred_center_local @ analysis_weight_ensemble
-		).T).T
+		# analysis_weight_matrix が対称なら転置とる必要がなくなる
+		# particle x particle
+		analysis_weight_ensemble = (analysis_weight_matrix.T + analysis_weight_mean).T
 
 
-	## Step9 : move analysis result to global analysis
-	# time x sys x particle
-	return analysis_system[len(np.where(A_sys[:i])[0])]
+		## Step8 : calculate analysis system variable in model space
+		# 転置が多くて少し気持ち悪い
+		# local_sys x particle
+		analysis_system = (x_pred_mean_local + (
+			x_pred_center_local @ analysis_weight_ensemble
+			).T).T
+
+
+		## Step9 : move analysis result to global analysis
+		# time x sys x particle
+		x_filt[i] =  analysis_system[len(np.where(A_sys[i, :i])[0])]
+
+	return x_filt
 
 
 class Local_Ensemble_Transform_Kalman_Filter(object):
@@ -123,7 +138,6 @@ class Local_Ensemble_Transform_Kalman_Filter(object):
 	n_dim_obs {int} : dimension of observation variable （観測変数の次元）
 	dtype {np.dtype} : numpy dtype (numpy のデータ型)
 	seed {int} : random seed (ランダムシード)
-	cpu_number {int} : cpu number for parallel processing (CPU数)
 	'''
 
 	def __init__(self, observation = None, transition_functions = None,
@@ -132,7 +146,7 @@ class Local_Ensemble_Transform_Kalman_Filter(object):
 				system_adjacency_matrix = None, observation_adjacency_matrix = None,
 				rho = 1,
 				n_particle = 100, n_dim_sys = None, n_dim_obs = None,
-				dtype = np.float32, seed = 10, cpu_number = 'all') :
+				dtype = np.float32, seed = 10) :
 
 		# 次元数をチェック，欠測値のマスク処理
 		self.y = self._parse_observations(observation)
@@ -201,66 +215,31 @@ class Local_Ensemble_Transform_Kalman_Filter(object):
 		np.random.seed(seed)
 		self.seed = seed
 		self.dtype = dtype
-		if cpu_number == 'all':
-			self.cpu_number = multi.cpu_count()
-		else:
-			self.cpu_number = cpu_number
 
 
 	# filtering step
 	def filter(self):
 		'''
 		T {int} : length of data y （時系列の長さ）
-		<class variables>
 		x_pred_mean [n_time+1, n_dim_sys] {numpy-array, float}
 			: mean of x_pred regarding to particles at time t
 			時刻 t における x_pred の粒子平均 [時間軸，状態変数軸]
 		x_filt [n_time+1, n_dim_sys, n_particle] {numpy-array, float}
 			: hidden state at time t given observations for each particle
-			状態変数のフィルタアンサンブル [時間軸，状態変数軸，粒子軸]
+			状態変数のフィルタアンサンブル [時間軸，粒子軸，状態変数軸]
 		x_filt_mean [n_time+1, n_dim_sys] {numpy-array, float}
 			: mean of x_filt regarding to particles
 			時刻 t における状態変数のフィルタ平均 [時間軸，状態変数軸]
 
-		<global variables>
 		x_pred [n_dim_sys, n_particle] {numpy-array, float}
 			: hidden state at time t given observations for each particle
-			状態変数の予測アンサンブル [状態変数軸，粒子軸]
+			状態変数の予測アンサンブル [粒子軸，状態変数軸]
 		x_pred_center [n_dim_sys, n_particle] {numpy-array, float}
 			: centering of x_pred
-			x_pred の中心化 [状態変数軸，粒子軸]
-		v [n_dim_sys, n_particle] {numpy-array, float}
-			: system noise for transition
-			システムノイズ [状態変数軸，粒子軸]
-		y_background [n_dim_obs, n_particle] {numpy-array, float}
-			: background value of observation space
-			観測空間における背景値(=一気先予測値) [観測変数軸，粒子軸]
-		y_background_mean [n_dim_obs] {numpy-array, float}
-			: mean of y_background for particles
-			y_background の粒子平均 [観測変数軸]
-		y_background_center [n_dim_obs, n_particle] {numpy-array, float}
-			: centerized value of y_background for particles
-			y_background の粒子中心化 [観測変数軸，粒子軸]
-
-		<local variables>
-		x_pred_mean_local [n_dim_local] {numpy-array, float}
-			: localization from x_pred_mean
-			x_pred_mean の局所値 [局所変数軸]
-		x_pred_center_local [n_dim_local, n_particle] {numpy-array, float}
-			: localization from x_pred_center
-			x_pred_center の局所値 [局所変数軸，粒子軸]
-		y_background_mean_local [n_dim_local] {numpy-array, float}
-			: localization from y_background_mean
-			y_background_mean の局所値 [局所変数軸]
-		y_background_center_local [n_dim_local, n_particle] {numpy-array, float}
-			: localization from y_background_center
-			y_background_center の局所値 [局所変数軸，粒子軸]
-		y_local [n_dim_local] {numpy-array, float}
-			: localization from observation y
-			観測 y の局所値 [局所変数軸]
-		R_local [n_dim_local, n_dim_local] {numpy-array, float}
-			: localization from observation covariance R
-			観測共分散 R の局所値 [局所変数軸，局所変数軸]
+			x_pred の中心化 [粒子軸，状態変数軸]
+		Inovation [n_dim_obs, n_particle] {numpy-array, float}
+			: Inovation from observation [観測変数軸，粒子軸]
+			観測と予測のイノベーション
 		'''
 
 		# 時系列の長さ, lenght of time-series
@@ -276,6 +255,9 @@ class Local_Ensemble_Transform_Kalman_Filter(object):
 		# 初期値のセッティング, initial setting
 		self.x_pred_mean[0] = self.initial_mean
 		self.x_filt_mean[0] = self.initial_mean
+
+		# イノベーション, observation inovation
+		Inovation = np.zeros((self.n_dim_obs, self.n_particle), dtype = self.dtype)
 
 		# 各時刻で予測・フィルタ計算, prediction and filtering
 		for t in range(T):
@@ -315,50 +297,17 @@ class Local_Ensemble_Transform_Kalman_Filter(object):
 
 				# y_background center : obs x particle
 				y_background_center = (y_background.T - y_background_mean).T
-
+				
 
 				## Step2 : calculate for model space
 				# x_pred_center : sys x particle
 				x_pred_center = (x_pred.T - self.x_pred_mean[t + 1]).T
 
+				## Step3-9 : local processing
+				self.x_filt[t + 1] =  _local_calculation(self.x_pred_mean[t], x_pred_center,
+					y_background_mean, y_background_center, self.y[t], R, self.A_sys, self.A_obs,
+					self.n_dim_sys, self.n_particle, self.rho)
 
-				## Step3 : select data for grid point
-				# global を local に移す写像（並列処理）
-				# n_dim_sys x local_sys
-				x_pred_mean_local = self._parallel_global_to_local(self.x_pred_mean[t],
-					self.n_dim_sys, self.A_sys)
-
-				# n_dim_sys x local_sys x particle
-				x_pred_center_local = self._parallel_global_to_local(x_pred_center,
-					self.n_dim_sys, self.A_sys)
-
-				# n_dim_sys x local_obs
-				y_background_mean_local = self._parallel_global_to_local(y_background_mean,
-					self.n_dim_obs, self.A_obs)
-
-				# n_dim_sys x local_obs x particle
-				y_background_center_local = self._parallel_global_to_local(
-					y_background_center,
-					self.n_dim_obs, self.A_obs
-					)
-
-				# n_dim_sys x local_obs
-				y_local = self._parallel_global_to_local(self.y[t], self.n_dim_obs, self.A_obs)
-
-				# n_dim_sys x local_obs x local_obs
-				R_local = np.zeros(self.n_dim_sys, dtype = object)
-				for i in range(self.n_dim_sys):
-					R_local[i] = R[self.A_obs[i]][:, self.A_obs[i]]
-
-				## Step4-9 : local processing
-				p = Pool(self.cpu_number)
-				self.x_filt[t + 1] = p.starmap(local_multi_processing, zip(
-					x_pred_mean_local, x_pred_center_local, y_background_mean_local,
-					y_background_center_local, y_local, R_local, range(self.n_dim_sys),
-					self.A_sys, itertools.repeat(self.n_particle),
-					itertools.repeat(self.rho)
-					))
-				p.close()
 
 			# フィルタ分布のアンサンブル平均の計算
 			self.x_filt_mean[t + 1] = np.mean(self.x_filt[t + 1], axis = 1)
@@ -394,20 +343,6 @@ class Local_Ensemble_Transform_Kalman_Filter(object):
 			return self.x_filt_mean[1:, int(dim)]
 		else:
 			raise ValueError('The dim must be less than ' + self.x_filt_mean.shape[1] + '.')
-
-
-	# parallel calculation for global to local (大域変数を局所変数に移すための計算)
-	def _parallel_global_to_local(self, variable, n_dim, adjacency_matrix):
-		'''
-		variable : input variable which transited from global to local
-		n_dim : dimension of variables
-		adjacency_matrix : adjacency matrix for transition
-		'''
-		p = Pool(self.cpu_number)
-		new_variable = p.starmap(global_to_local,
-			zip(adjacency_matrix, itertools.repeat(variable, n_dim)))
-		p.close()
-		return new_variable
 
 
 	# parse observations (観測変数の次元チェック，マスク処理)
