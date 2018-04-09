@@ -105,16 +105,21 @@ class Particle_Filter(object):
             self.initial_covariance = initial_covariance.astype(dtype)
 
         # likelihood_functions, likelihood_function_parameters None
-        if likelihood_functions is None or likelihood_function_parameters is None:
-            self.likelihood_function_is_log_form = True
-            self.observation_parameters_time_invariant = True
-            self.lf = self._log_norm_likelihood
-            self.lfp = [np.eye(self.n_dim_obs, dtype = self.dtype)]
-        else:
+        if likelihood_function_parameters is None:
             self.likelihood_function_is_log_form = likelihood_function_is_log_form
             self.observation_parameters_time_invariant = observation_parameters_time_invariant
             self.lf = likelihood_functions
             self.lfp = likelihood_function_parameters
+        else:
+            self.likelihood_function_is_log_form = True
+            self.observation_parameters_time_invariant = True
+            self.lf = self._log_norm_likelihood
+
+            # 正規尤度は用いるが，パラメータRだけ変えたい場合
+            if likelihood_functions is None:
+                self.lfp = [np.eye(self.n_dim_obs, dtype = dtype)]
+            else:
+                self.lfp = likelihood_function_parameters
 
         self.n_particle = n_particle
         np.random.seed(seed)
