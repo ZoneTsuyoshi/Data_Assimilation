@@ -84,6 +84,10 @@ class Kalman_Filter(object) :
     observation_offsets [n_time, n_dim_obs] or [n_dim_obs] {numpy-array, float}
         : offsets of observation model
         観測モデルの切片[時間軸，観測変数軸] or [観測変数軸]
+    transition_observation_covariance [n_time, n_dim_obs, n_dim_sys]
+        or [n_dim_obs, n_dim_sys], {numpy-array, float}
+        : covariance between transition noise and observation noise
+        状態ノイズと観測ノイズ間の共分散 [時間軸，観測変数軸，状態変数軸] or [観測変数軸，状態変数軸]
     em_vars {list, string} : variable name list for EM algorithm
         (EMアルゴリズムで最適化する変数リスト)
     em_dics {dictionary} : dictionary for EM algorithm
@@ -100,6 +104,7 @@ class Kalman_Filter(object) :
     H : observation_matrices
     R : observation_covariance
     d : observation_offsets
+    S : transition_observation_covariance
     x_pred [n_time+1, n_dim_sys] {numpy-array, float} 
         : mean of prediction distribution
         予測分布の平均 [時間軸，状態変数軸]
@@ -118,6 +123,9 @@ class Kalman_Filter(object) :
     V_smooth [n_time, n_dim_sys, n_dim_sys] {numpy-array, float}
         : covariance of RTS smoothing distribution
         固定区間平滑化の共分散行列 [時間軸，状態変数軸，状態変数軸]
+    filter_update {function}
+        : update function from x_t to x_{t+1}
+        フィルター更新関数
 
     
     state space model(状態方程式)
@@ -133,6 +141,7 @@ class Kalman_Filter(object) :
                 transition_covariance = None, observation_covariance = None,
                 transition_noise_matrices = None,
                 transition_offsets = None, observation_offsets = None,
+                transition_observation_covariance = None,
                 em_vars = ['transition_covariance', 'observation_covariance',
                     'initial_mean', 'initial_covariance'],
                 em_dics = {}, 
@@ -145,14 +154,16 @@ class Kalman_Filter(object) :
              (transition_noise_matrices, array2d, -2),
              (initial_mean, array1d, -1),
              (initial_covariance, array2d, -2),
-             (observation_matrices, array2d, -1)],
+             (observation_matrices, array2d, -1),
+             (transition_observation_covariance, array2d, -2)],
             n_dim_sys
         )
 
         self.n_dim_obs = self._determine_dimensionality(
             [(observation_matrices, array2d, -2),
              (observation_offsets, array1d, -1),
-             (observation_covariance, array2d, -2)],
+             (observation_covariance, array2d, -2),
+             (transition_observation_covariance, array2d, -1)],
             n_dim_obs
         )
 
@@ -227,6 +238,13 @@ class Kalman_Filter(object) :
         else :
             self.d = observation_offsets.astype(dtype)
 
+        # transition_observation_covariance が未入力ならば，零行列
+        if transition_observation_covariance is None:
+            self.predict_update = self._predict_update_no_noise
+        else:
+            self.S = transition_observation_covariance
+            self.predict_update = self._predict_update_noise
+
         # EM algorithm で最適化するパラメータ群
         self.em_vars = em_vars
         self.em_dics = em_dics
@@ -273,14 +291,17 @@ class Kalman_Filter(object) :
                 self.x_pred[0] = self.initial_mean
                 self.V_pred[0] = self.initial_covariance
             else:
+                self.predict_update(t)
+                '''
                 # extract t-1 parameters (時刻t-1のパラメータ取り出す)
                 F = self._last_dims(self.F, t - 1, 2)
                 Q = self._last_dims(self.Q, t - 1, 2)
                 b = self._last_dims(self.b, t - 1, 1)
 
                 # predict t distribution (時刻tの予測分布の計算)
-                self.x_pred[t] = np.dot(F, self.x_filt[t-1]) + b
-                self.V_pred[t] = np.dot(F, np.dot(self.V_filt[t-1], F.T)) + Q
+                self.x_pred[t] = F @ self.x_filt[t-1] + b
+                self.V_pred[t] = F @ self.V_filt[t-1] @ F.T + Q
+                '''
 
             
             # y[t] の何れかがマスク処理されていれば，フィルタリングはカットする
@@ -294,16 +315,9 @@ class Kalman_Filter(object) :
                 d = self._last_dims(self.d, t, 1)
 
                 # filtering (フィルタ分布の計算)
-                K = np.dot(
-                    self.V_pred[t], 
-                    np.dot(
-                        H.T, 
-                        linalg.pinv(np.dot(H, np.dot(self.V_pred[t], H.T)) + R)
-                        )
-                    )
-                self.x_filt[t] = self.x_pred[t] \
-                    + np.dot(K, self.y[t] - (np.dot(H, self.x_pred[t]) + d))
-                self.V_filt[t] = self.V_pred[t] - np.dot(K, np.dot(H, self.V_pred[t]))
+                K = self.V_pred[t] @ (H.T @ linalg.pinv(H @ (self.V_pred[t] @ H.T + R)))
+                self.x_filt[t] = self.x_pred[t] + K @ (self.y[t] - (H @ self.x_pred[t] + d))
+                self.V_filt[t] = self.V_pred[t] - K @ (H @ self.V_pred[t])
                 
 
     # get predicted value (一期先予測値を返す関数, Filter 関数後に値を得たい時)
@@ -591,6 +605,39 @@ class Kalman_Filter(object) :
         else:
             raise ValueError(("X only has %d dimensions when %d" +
                     " or more are required") % (len(X.shape), ndims))
+
+
+    # ノイズなしの予報アップデート関数
+    def _predict_update_no_noise(self, t):
+        # extract t-1 parameters (時刻t-1のパラメータ取り出す)
+        F = self._last_dims(self.F, t - 1, 2)
+        Q = self._last_dims(self.Q, t - 1, 2)
+        b = self._last_dims(self.b, t - 1, 1)
+
+        # predict t distribution (時刻tの予測分布の計算)
+        self.x_pred[t] = F @ self.x_filt[t-1] + b
+        self.V_pred[t] = F @ self.V_filt[t-1] @ F.T + Q
+
+
+    # ノイズありの予報アップデート関数
+    def _predict_update_noise(self, t):
+        if np.any(np.ma.getmask(self.y[t-1])) :
+            self._predict_update_no_noise(t)
+        else:
+            # extract t-1 parameters (時刻t-1のパラメータ取り出す)
+            F = self._last_dims(self.F, t - 1, 2)
+            Q = self._last_dims(self.Q, t - 1, 2)
+            b = self._last_dims(self.b, t - 1, 1)
+            H = self._last_dims(self.H, t - 1, 2)
+            d = self._last_dims(self.d, t - 1, 1)
+            S = self._last_dims(self.S, t - 1, 2)
+            R = self._last_dims(self.R, t - 1, 2)
+
+            # predict t distribution (時刻tの予測分布の計算)
+            SR = S @ linalg.pinv(R)
+            F_SRH = F - SR @ H
+            self.x_pred[t] = F_SRH @ self.x_filt[t-1] + b + SR @ (self.y[t-1] - d)
+            self.V_pred[t] = F_SRH @ self.V_filt[t-1] @ F_SRH.T + Q - SR @ S.T
 
 
     # sigma pair smooth 計算
