@@ -12,6 +12,8 @@ from scipy import linalg
 
 from utils import array1d, array2d, check_random_state, get_params, \
     preprocess_arguments, check_random_state
+from utils_filter import _parse_observations, _last_dims, \
+    _determine_dimensionality
 
 class Particle_Filter(object):
     '''
@@ -37,7 +39,8 @@ class Particle_Filter(object):
     lf, likelihood_functions [n_time] or [] {function}
         : likelihood function between x_t and y_t
         観測モデルの尤度関数 [時間軸] or []
-    lfp, likelihood_function_parameters [n_time, n_param] or [n_param] {numpy-array, float}
+    lfp, likelihood_function_parameters [n_time, n_param] or [n_param]
+     {numpy-array, float}
         : parameters for likelihood function
         尤度関数のパラメータ群 [時間軸，パラメータ軸] or [パラメータ軸]
     likelihood_function_is_log_form {boolean}
@@ -62,16 +65,16 @@ class Particle_Filter(object):
                 dtype = np.float32, seed = 10) :
 
         # 次元数をチェック，欠測値のマスク処理
-        self.y = self._parse_observations(observation)
+        self.y = _parse_observations(observation)
 
         # 次元決定
-        self.n_dim_sys = self._determine_dimensionality(
+        self.n_dim_sys = _determine_dimensionality(
             [(initial_mean, array1d, -1),
             (initial_covariance, array2d, -2)],
             n_dim_sys
         )
 
-        self.n_dim_obs = self._determine_dimensionality(
+        self.n_dim_obs = _determine_dimensionality(
             [(observation, array1d, -1)],
             n_dim_obs
         )
@@ -107,7 +110,8 @@ class Particle_Filter(object):
         # likelihood_functions, likelihood_function_parameters None
         if likelihood_function_parameters is None:
             self.likelihood_function_is_log_form = likelihood_function_is_log_form
-            self.observation_parameters_time_invariant = observation_parameters_time_invariant
+            self.observation_parameters_time_invariant \
+                = observation_parameters_time_invariant
             self.lf = likelihood_functions
             self.lfp = likelihood_function_parameters
         else:
@@ -143,7 +147,8 @@ class Particle_Filter(object):
         '''
         Y = np.zeros((self.n_dim_obs, self.n_particle), dtype = self.dtype)
         Y.T[:] = y
-        return np.exp((- 0.5 * (Y - mean).T @ linalg.pinv(covariance) @ (Y - mean))[:, 0])
+        return np.exp((- 0.5 * (Y - mean).T @ linalg.pinv(covariance) \
+                @ (Y - mean))[:, 0])
     
 
     # log likelihood for normal distribution
@@ -162,7 +167,9 @@ class Particle_Filter(object):
         '''
         Y = np.zeros((self.n_dim_obs, self.n_particle), dtype = self.dtype)
         Y.T[:] = y
-        return (- 0.5 * (Y - mean).T @ linalg.pinv(covariance) @ (Y - mean)).diagonal()
+        return (
+            - 0.5 * (Y - mean).T @ linalg.pinv(covariance) @ (Y - mean)
+            ).diagonal()
 
 
     # 経験分布の逆写像
@@ -202,7 +209,9 @@ class Particle_Filter(object):
         u0 = rd.uniform(0, 1 / self.n_particle)
         u = [1 / self.n_particle*i + u0 for i in range(self.n_particle)]
         w_cumsum = np.cumsum(weights)
-        k = np.asanyarray([self._emperical_cummulative_inv(w_cumsum, idx, val) for val in u])
+        k = np.asanyarray([
+            self._emperical_cummulative_inv(w_cumsum, idx, val) for val in u
+            ])
         return k
     
 
@@ -256,7 +265,7 @@ class Particle_Filter(object):
             
             ## filter update
             # 一期先予測, prediction
-            f = self._last_dims(self.f, t, 1)[0]
+            f = _last_dims(self.f, t, 1)[0]
 
             # システムノイズをパラメトリックに発生, raise parametric system noise
             v = self.q[0](*self.q[1], size = self.n_particle).T
@@ -278,7 +287,8 @@ class Particle_Filter(object):
                 try:
                     w = lf(self.y[t], x_pred, *lfp)
                 except:
-                    raise ValueError('you must check likelihood_functions and parameters.')
+                    raise ValueError('you must check likelihood_functions' 
+                        + 'and parameters.')
                 
                 # 発散防止, avoid evaporation
                 if self.likelihood_function_is_log_form:
@@ -310,7 +320,8 @@ class Particle_Filter(object):
         elif dim <= self.x_pred_mean.shape[1]:
             return self.x_pred_mean[1:, int(dim)]
         else:
-            raise ValueError('The dim must be less than ' + self.x_pred_mean.shape[1] + '.')
+            raise ValueError('The dim must be less than '
+             + self.x_pred_mean.shape[1] + '.')
 
 
     # get filtered value (フィルタ値を返す関数，Filter 関数後に値を得たい時)
@@ -326,7 +337,8 @@ class Particle_Filter(object):
         elif dim <= self.x_filt_mean.shape[1]:
             return self.x_filt_mean[1:, int(dim)]
         else:
-            raise ValueError('The dim must be less than ' + self.x_filt_mean.shape[1] + '.')
+            raise ValueError('The dim must be less than '
+             + self.x_filt_mean.shape[1] + '.')
 
 
     # メモリ節約のため，filter のオーバーラップ
@@ -375,7 +387,8 @@ class Particle_Filter(object):
         self.x_smooth_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
         x_pred = np.zeros((self.n_dim_sys, self.n_particle), dtype = self.dtype)
         x_filt = np.zeros((self.n_dim_sys, self.n_particle), dtype = self.dtype)
-        x_smooth = np.zeros((T + 1, self.n_dim_sys, self.n_particle), dtype = self.dtype)
+        x_smooth = np.zeros((T + 1, self.n_dim_sys, self.n_particle),
+             dtype = self.dtype)
 
         # initial distribution
         x_filt = rd.multivariate_normal(self.initial_mean, self.initial_covariance, 
@@ -391,7 +404,7 @@ class Particle_Filter(object):
             
             ## filter update
             # 一期先予測, prediction
-            f = self._last_dims(self.f, t, 1)[0]
+            f = _last_dims(self.f, t, 1)[0]
 
             # システムノイズをパラメトリックに発生, raise parametric system noise
             v = self.q[0](*self.q[1], size = self.n_particle).T
@@ -413,7 +426,8 @@ class Particle_Filter(object):
                 try:
                     w = lf(self.y[t], x_pred, *lfp)
                 except:
-                    raise ValueError('you must check likelihood_functions and parameters.')
+                    raise ValueError('you must check likelihood_functions'
+                        + ' and parameters.')
                 
                 # 発散防止, avoid evaporation
                 if self.likelihood_function_is_log_form:
@@ -454,72 +468,8 @@ class Particle_Filter(object):
         elif dim <= self.x_smooth_mean.shape[1]:
             return self.x_smooth_mean[1:, int(dim)]
         else:
-            raise ValueError('The dim must be less than ' + self.x_smooth_mean.shape[1] + '.')
-
-
-    # parse observations (観測変数の次元チェック，マスク処理)
-    def _parse_observations(self, obs):
-        """Safely convert observations to their expected format"""
-        obs = np.ma.atleast_2d(obs)
-
-        # 2軸目の方が大きい場合は，第1軸と第2軸を交換
-        if obs.shape[0] == 1 and obs.shape[1] > 1:
-            obs = obs.T
-
-        # 欠測値をマスク処理
-        obs = np.ma.array(obs, mask = np.isnan(obs))
-        return obs
-
-
-    # determine dimensionality function (次元決定関数)
-    def _determine_dimensionality(self, variables, default = None):
-        """Derive the dimensionality of the state space
-        Parameters (入力変数)
-        ----------
-        variables : list of ({None, array}, conversion function, index)
-            variables, functions to convert them to arrays, and indices in those
-            arrays to derive dimensionality from.
-            (配列，時間軸を除いた軸数，対応する次元のインデックス)を入れる
-            望ましい軸数より1多い場合，最初の軸が時間軸であることがわかる
-
-        default : {None, int}
-            default dimensionality to return if variables is empty
-            デフォルト次元が設定されていたら int 値，そうでなければ None
-        
-        Returns
-        -------
-        dim : int
-            dimensionality of state space as derived from variables or default.
-            状態空間モデルの次元数を返す
-        """
-
-        # gather possible values based on the variables
-        # 各変数の候補次元を集める
-        candidates = []
-        for (v, converter, idx) in variables:
-            if v is not None:
-                v = converter(v)
-                candidates.append(v.shape[idx])
-
-        # also use the manually specified default
-        # 人為的にデフォルト値が定まっていればそれも候補次元とする
-        if default is not None:
-            candidates.append(default)
-
-        # ensure consistency of all derived values
-        # 各処理の次元数の一致確認
-        if len(candidates) == 0:
-            return 1
-        else:
-            # 候補次元が一致しなければ ValueError を raise する
-            if not np.all(np.array(candidates) == candidates[0]):
-                print(candidates)
-                raise ValueError(
-                    "The shape of all " +
-                    "parameters is not consistent.  " +
-                    "Please re-check their values."
-                )
-            return candidates[0]
+            raise ValueError('The dim must be less than '
+             + self.x_smooth_mean.shape[1] + '.')
 
 
     # last likelihood function and parameters (尤度関数とパラメータの決定)
@@ -546,31 +496,3 @@ class Particle_Filter(object):
             except:
                 raise ValueError('you must check which likelihood ' + 
                     'parameters are time-invariant.')
-
-
-    # last dim (各時刻におけるパラメータを決定する関数)
-    def _last_dims(self, X, t, ndims = 2):
-        """Extract the final dimensions of `X`
-        Extract the final `ndim` dimensions at index `t` if `X` has >= `ndim` + 1
-        dimensions, otherwise return `X`.
-        Parameters
-        ----------
-        X : array with at least dimension `ndims`
-        t : int
-            index to use for the `ndims` + 1th dimension
-        ndims : int, optional
-            number of dimensions in the array desired
-
-        Returns
-        -------
-        Y : array with dimension `ndims`
-            the final `ndims` dimensions indexed by `t`
-        """
-        X = np.asarray(X)
-        if len(X.shape) == ndims + 1:
-            return X[t]
-        elif len(X.shape) == ndims:
-            return X
-        else:
-            raise ValueError(("X only has %d dimensions when %d (time-invariant)" +
-                    " or %d (time-variant) are required") % (len(X.shape), ndims, ndims + 1))

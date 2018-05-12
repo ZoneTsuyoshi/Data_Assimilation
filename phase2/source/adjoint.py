@@ -20,11 +20,14 @@ class Adjoint_Method (object) :
     alpha {float} : learning rate of gradient method, 勾配法の学習率
     x_init [n_dim_sys] {float} : initial system x (adjusting parameter), 初期状態変数
     F_init [time] {numpy-array, float} : parameter for outforce F, 外力の初期値
-    update_param [n_dim_param] : parameter for update function, モデル更新関数用パラメータセット
+    update_param [n_dim_param] : parameter for update function,
+    	 モデル更新関数用パラメータセット
     ad_eval_bg [n_dim_bg, each_bg_dim]
-        : parameter for adjoint, evaluation function, アジョイント更新関数，評価関数用背景値セット
+        : parameter for adjoint, evaluation function,
+        アジョイント更新関数，評価関数用背景値セット
     ad_param [n_dim_param]
-    	: parameter for adjoint update function, アジョイント更新関数用パラメータセット
+    	: parameter for adjoint update function,
+    	アジョイント更新関数用パラメータセット
     eval_param [n_dim_param]
     	: parameter for evaluation function, 評価関数用パラメータセット
     evaluation_function {function}
@@ -38,12 +41,15 @@ class Adjoint_Method (object) :
     n_dim_sys {int} : dimension of system x, 状態変数の次元
     x [time, n_dim_sys] {numpy-array, float} : system state of each time, システム変数
     F_update [time] {numpy-array, float} : parameter for outforce F, 外力パラメータF
-    eval_value [n_epoch] {numpy-array, float} : evaluation function value, 評価関数の値
+    eval_value [n_epoch] {numpy-array, float} :
+    	evaluation function value,
+    	評価関数の値
     grad_abs [n_epoch] {numpy-array, float} : gradient absolute value, 勾配の大きさ
     ad [n_dim + 1] {float} : adjoint variable lambda, アジョイント変数
     '''
-    def __init__(self, y = None, n_epoch = 20, alpha = 0.01, x_init = None, F_init = None,
-                 update_param = None, ad_eval_bg = None, ad_param = None, eval_param = None,
+    def __init__(self, y = None, n_epoch = 20, alpha = 0.01, x_init = None,
+    			 F_init = None, update_param = None, ad_eval_bg = None,
+    			 ad_param = None, eval_param = None,
                  evaluation_function = None,
                  model_update_function = None,
                  adjoint_update_function = None) :
