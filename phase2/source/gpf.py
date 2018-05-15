@@ -1,11 +1,7 @@
 '''
-particle filter のクラス
-18.03.22
-- 観測ノイズは正規分布を想定した尤度計算となっている
-18.03.26
-- 観測モデルの一般化
+gaussian particle filter のクラス
 18.05.15
-- 正則化(サンプリングした粒子に摂動を与えること)の導入
+- フィルター作成
 '''
 
 import numpy as np
@@ -17,9 +13,9 @@ from utils import array1d, array2d, check_random_state, get_params, \
 from utils_filter import _parse_observations, _last_dims, \
     _determine_dimensionality
 
-class Particle_Filter(object):
+class Gaussian_Particle_Filter(object):
     '''
-    Particle Filter のクラス
+    Gaussian Particle Filter のクラス
 
     <Input Variables>
     y, observation [n_time, n_dim_obs] {numpy-array, float}
@@ -51,9 +47,6 @@ class Particle_Filter(object):
     observation_parameters_time_invariant {boolean}
         : time-invariantness of observation parameters
         観測パラメータの時不変性の有無
-    eta, regularization_noise [n_time - 1] {(method, parameters)}
-        : noise distribution for regularization
-        正則化のためのノイズ分布
     n_particle {int} : number of particles (粒子数)
     n_dim_sys {int} : dimension of system variable （システム変数の次元）
     n_dim_obs {int} : dimension of observation variable （観測変数の次元）
@@ -71,7 +64,6 @@ class Particle_Filter(object):
                 likelihood_functions = None, likelihood_function_parameters = None,
                 likelihood_function_is_log_form = True,
                 observation_parameters_time_invariant = True,
-                regularization_noise = None,
                 n_particle = 100, n_dim_sys = None, n_dim_obs = None,
                 dtype = np.float32, seed = 10) :
 
@@ -136,13 +128,6 @@ class Particle_Filter(object):
             else:
                 self.lfp = likelihood_function_parameters
 
-        # regularization_noise
-        if regularization_noise is None:
-            self.regularization = False
-        else:
-            self.eta = regularization_noise
-            self.regularization = True
-
         self.n_particle = n_particle
         np.random.seed(seed)
         self.dtype = dtype
@@ -188,49 +173,6 @@ class Particle_Filter(object):
         return (
             - 0.5 * (Y - mean).T @ linalg.pinv(covariance) @ (Y - mean)
             ).diagonal()
-
-
-    # 経験分布の逆写像
-    def _emperical_cummulative_inv(self, w_cumsum, idx, u):
-        if np.any(w_cumsum < u) == False:
-            return 0
-        k = np.max(idx[w_cumsum < u])
-        return k + 1
-        
-
-    # 通常のリサンプリング
-    def _resampling(self, weights):
-        '''
-        通常のリサンプリング (standard resampling method)
-        '''
-        w_cumsum = np.cumsum(weights)
-
-        # labelの生成
-        idx = np.asanyarray(range(self.n_particle))
-
-        # サンプリングしたkのリスト格納場所
-        k_list = np.zeros(self.n_particle, dtype = np.int32)
-        
-        # 一様分布から重みに応じてリサンプリングする添え字を取得
-        for i, u in enumerate(rd.uniform(0, 1, size = self.n_particle)):
-            k = self._emperical_cummulative_inv(w_cumsum, idx, u)
-            k_list[i] = k
-        return k_list
-
-
-    # 層化リサンプリング
-    def _stratified_resampling(self, weights):
-        """
-        層化リサンプリング (stratified resampling method)
-        """
-        idx = np.asanyarray(range(self.n_particle))
-        u0 = rd.uniform(0, 1 / self.n_particle)
-        u = [1 / self.n_particle*i + u0 for i in range(self.n_particle)]
-        w_cumsum = np.cumsum(weights)
-        k = np.asanyarray([
-            self._emperical_cummulative_inv(w_cumsum, idx, val) for val in u
-            ])
-        return k
     
 
     # filtering
@@ -257,9 +199,6 @@ class Particle_Filter(object):
         v [n_dim_sys, n_particle] {numpy-array, float}
             : system noise particles
             各時刻の状態ノイズ [状態変数軸，粒子軸]
-        k [n_particle] {numpy-array, float}
-            : index number for resampling
-            各時刻のリサンプリングインデックス [粒子軸]
         '''
 
         # 時系列の長さ, number of time-series data
@@ -271,6 +210,7 @@ class Particle_Filter(object):
         x_pred = np.zeros((self.n_dim_sys, self.n_particle), dtype = self.dtype)
 
         # initial distribution
+        # sys x particle
         x_filt = rd.multivariate_normal(self.initial_mean, self.initial_covariance, 
             size = self.n_particle).T
         
@@ -289,20 +229,24 @@ class Particle_Filter(object):
             v = self.q[0](*self.q[1], size = self.n_particle).T
 
             # アンサンブル予測, ensemble prediction
+            # sys x particle
             x_pred = f(*[x_filt, v])
 
             # mean
+            # sys
             self.x_pred_mean[t + 1] = np.mean(x_pred, axis = 1)
             
             # 欠測値の対処, treat missing values
             if np.any(np.ma.getmask(self.y[t])):
                 x_filt = x_pred
+                self.x_filt_mean[t + 1] = self.x_pred_mean[t + 1]
             else:
                 # log likelihood for each particle for y[t]
                 # 対数尤度の計算
                 lf = self._last_likelihood(self.lf, t)
                 lfp = self._last_likelihood(self.lfp, t)
                 try:
+                    # particle
                     w = lf(self.y[t], x_pred, *lfp)
                 except:
                     raise ValueError('you must check likelihood_functions' 
@@ -315,18 +259,23 @@ class Particle_Filter(object):
                     w = w / np.max(w)
 
                 # 重みの正規化, normalization
+                # particle
                 w = w / np.sum(w)
 
-                # resampling
-                k = self._stratified_resampling(w)
-                x_filt = x_pred[:, k]
+                # 重み付き平均の計算
+                # sys
+                self.x_filt_mean[t + 1] = w @ x_pred.T
 
-                # regularization
-                if self.regularization:
-                    x_filt += self.eta[0](*self.eta[1], size = self.n_particle).T
-            
-            # mean
-            self.x_filt_mean[t + 1] = np.mean(x_filt, axis = 1)
+                # 重み付き共分散の計算
+                # sys x particle
+                x_pred.T[:] -= self.x_filt_mean[t + 1]
+
+                # sys x sys
+                V_filt = np.dot(np.multiply(x_pred, w), x_pred.T)
+
+                # sys x particle
+                x_filt = rd.multivariate_normal(self.x_filt_mean[t + 1],
+                    V_filt, size = self.n_particle).T
 
         
     # get predicted value (一期先予測値を返す関数, Filter 関数後に値を得たい時)
@@ -363,122 +312,111 @@ class Particle_Filter(object):
              + self.x_filt_mean.shape[1] + '.')
 
 
-    # メモリ節約のため，filter のオーバーラップ
-    def smooth(self, lag = 10):
-        '''
-        lag {int} : ラグ，lag of smoothing
-        T {int} : 時系列の長さ，length of y
+    # # メモリ節約のため，filter のオーバーラップ
+    # def smooth(self, lag = 10):
+    #     '''
+    #     lag {int} : ラグ，lag of smoothing
+    #     T {int} : 時系列の長さ，length of y
 
-        x_pred_mean [n_time+1, n_dim_sys] {numpy-array, float}
-            : mean of x_pred regarding to particles at time t
-            時刻 t における x_pred の粒子平均 [時間軸，状態変数軸]
-        x_filt_mean [n_time+1, n_dim_sys] {numpy-array, float}
-            : mean of x_filt regarding to particles at time t
-            時刻 t における状態変数のフィルタ平均 [時間軸，状態変数軸]
-        x_smooth_mean [n_time, n_dim_sys] {numpy-array, float}
-            : mean of x_smooth regarding to particles at time t
-            時刻 t における状態変数の平滑化平均 [時間軸，状態変数軸]
+    #     x_pred_mean [n_time+1, n_dim_sys] {numpy-array, float}
+    #         : mean of x_pred regarding to particles at time t
+    #         時刻 t における x_pred の粒子平均 [時間軸，状態変数軸]
+    #     x_filt_mean [n_time+1, n_dim_sys] {numpy-array, float}
+    #         : mean of x_filt regarding to particles at time t
+    #         時刻 t における状態変数のフィルタ平均 [時間軸，状態変数軸]
+    #     x_smooth_mean [n_time, n_dim_sys] {numpy-array, float}
+    #         : mean of x_smooth regarding to particles at time t
+    #         時刻 t における状態変数の平滑化平均 [時間軸，状態変数軸]
 
-        x_pred [n_dim_sys, n_particle]
-            : hidden state at time t given observations[:t-1] for each particle
-            状態変数の予測アンサンブル [状態変数軸，粒子軸]
-        x_filt [n_particle, n_dim_sys] {numpy-array, float}
-            : hidden state at time t given observations[:t] for each particle
-            状態変数のフィルタアンサンブル [状態変数軸，粒子軸]
-        x_smooth [n_time, n_dim_sys, n_particle] {numpy-array, float}
-            : hidden state at time t given observations[:t+lag] for each particle
-            状態変数の平滑化アンサンブル [時間軸，状態変数軸，粒子軸]
+    #     x_pred [n_dim_sys, n_particle]
+    #         : hidden state at time t given observations[:t-1] for each particle
+    #         状態変数の予測アンサンブル [状態変数軸，粒子軸]
+    #     x_filt [n_particle, n_dim_sys] {numpy-array, float}
+    #         : hidden state at time t given observations[:t] for each particle
+    #         状態変数のフィルタアンサンブル [状態変数軸，粒子軸]
+    #     x_smooth [n_time, n_dim_sys, n_particle] {numpy-array, float}
+    #         : hidden state at time t given observations[:t+lag] for each particle
+    #         状態変数の平滑化アンサンブル [時間軸，状態変数軸，粒子軸]
 
-        w [n_particle] {numpy-array, float}
-            : weight lambda of each particle
-            各粒子の尤度 [粒子軸]
-        v [n_dim_sys, n_particle] {numpy-array, float}
-            : system noise particles
-            各時刻の状態ノイズ [状態変数軸，粒子軸]
-        k [n_particle] {numpy-array, float}
-            : index number for resampling
-            各時刻のリサンプリングインデックス [粒子軸]
-        '''
+    #     w [n_particle] {numpy-array, float}
+    #         : weight lambda of each particle
+    #         各粒子の尤度 [粒子軸]
+    #     v [n_dim_sys, n_particle] {numpy-array, float}
+    #         : system noise particles
+    #         各時刻の状態ノイズ [状態変数軸，粒子軸]
+    #     '''
 
-        # 時系列の長さ, number of time-series data
-        T = len(self.y)
+    #     # 時系列の長さ, number of time-series data
+    #     T = len(self.y)
         
-        # initial filter, prediction
-        self.x_pred_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-        self.x_filt_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-        self.x_smooth_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
-        x_pred = np.zeros((self.n_dim_sys, self.n_particle), dtype = self.dtype)
-        x_filt = np.zeros((self.n_dim_sys, self.n_particle), dtype = self.dtype)
-        x_smooth = np.zeros((T + 1, self.n_dim_sys, self.n_particle),
-             dtype = self.dtype)
+    #     # initial filter, prediction
+    #     self.x_pred_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
+    #     self.x_filt_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
+    #     self.x_smooth_mean = np.zeros((T + 1, self.n_dim_sys), dtype = self.dtype)
+    #     x_pred = np.zeros((self.n_dim_sys, self.n_particle), dtype = self.dtype)
+    #     x_filt = np.zeros((self.n_dim_sys, self.n_particle), dtype = self.dtype)
+    #     x_smooth = np.zeros((T + 1, self.n_dim_sys, self.n_particle),
+    #          dtype = self.dtype)
 
-        # initial distribution
-        x_filt = rd.multivariate_normal(self.initial_mean, self.initial_covariance, 
-            size = self.n_particle).T
+    #     # initial distribution
+    #     x_filt = rd.multivariate_normal(self.initial_mean, self.initial_covariance, 
+    #         size = self.n_particle).T
         
-        # initial setting
-        self.x_pred_mean[0] = self.initial_mean
-        self.x_filt_mean[0] = self.initial_mean
-        self.x_smooth_mean[0] = self.initial_mean
+    #     # initial setting
+    #     self.x_pred_mean[0] = self.initial_mean
+    #     self.x_filt_mean[0] = self.initial_mean
+    #     self.x_smooth_mean[0] = self.initial_mean
 
-        for t in range(T):
-            print("\r filter and smooth calculating... t={}".format(t), end="")
+    #     for t in range(T):
+    #         print("\r filter and smooth calculating... t={}".format(t), end="")
             
-            ## filter update
-            # 一期先予測, prediction
-            f = _last_dims(self.f, t, 1)[0]
+    #         ## filter update
+    #         # 一期先予測, prediction
+    #         f = _last_dims(self.f, t, 1)[0]
 
-            # システムノイズをパラメトリックに発生, raise parametric system noise
-            v = self.q[0](*self.q[1], size = self.n_particle).T
+    #         # システムノイズをパラメトリックに発生, raise parametric system noise
+    #         v = self.q[0](*self.q[1], size = self.n_particle).T
 
-            # アンサンブル予測, ensemble prediction
-            x_pred = f(*[x_filt, v])
+    #         # アンサンブル予測, ensemble prediction
+    #         x_pred = f(*[x_filt, v])
 
-            # mean
-            self.x_pred_mean[t + 1] = np.mean(x_pred, axis = 1)
+    #         # mean
+    #         self.x_pred_mean[t + 1] = np.mean(x_pred, axis = 1)
             
-            # 欠測値の対処, treat missing values
-            if np.any(np.ma.getmask(self.y[t])):
-                x_filt = x_pred
-            else:
-                # log likelihood for each particle for y[t]
-                # 対数尤度の計算
-                lf = self._last_likelihood(self.lf, t)
-                lfp = self._last_likelihood(self.lfp, t)
-                try:
-                    w = lf(self.y[t], x_pred, *lfp)
-                except:
-                    raise ValueError('you must check likelihood_functions'
-                        + ' and parameters.')
+    #         # 欠測値の対処, treat missing values
+    #         if np.any(np.ma.getmask(self.y[t])):
+    #             x_filt = x_pred
+    #         else:
+    #             # log likelihood for each particle for y[t]
+    #             # 対数尤度の計算
+    #             lf = self._last_likelihood(self.lf, t)
+    #             lfp = self._last_likelihood(self.lfp, t)
+    #             try:
+    #                 w = lf(self.y[t], x_pred, *lfp)
+    #             except:
+    #                 raise ValueError('you must check likelihood_functions'
+    #                     + ' and parameters.')
                 
-                # 発散防止, avoid evaporation
-                if self.likelihood_function_is_log_form:
-                    w = np.exp(w - np.max(w))
-                else:
-                    w = w / np.max(w)
-
-                # resampling
-                k = self._stratified_resampling(w)
-                x_filt = x_pred[:, k]
-
-                # regularization
-                if self.regularization:
-                    x_filt += self.eta[0](*self.eta[1], size = self.n_particle).T
+    #             # 発散防止, avoid evaporation
+    #             if self.likelihood_function_is_log_form:
+    #                 w = np.exp(w - np.max(w))
+    #             else:
+    #                 w = w / np.max(w)
             
-            # initial smooth value
-            x_smooth[t + 1] = x_filt
+    #         # initial smooth value
+    #         x_smooth[t + 1] = x_filt
             
-            # mean
-            self.x_filt_mean[t + 1] = np.mean(x_filt, axis = 1)
+    #         # mean
+    #         self.x_filt_mean[t + 1] = np.mean(x_filt, axis = 1)
 
-            # smoothing
-            if (t > lag - 1) :
-                x_smooth[t - lag:t + 1] = x_smooth[t - lag:t + 1, :, k]
-            else :
-                x_smooth[:t + 1] = x_smooth[:t + 1, :, k]
+    #         # smoothing
+    #         if (t > lag - 1) :
+    #             x_smooth[t - lag:t + 1] = x_smooth[t - lag:t + 1, :, k]
+    #         else :
+    #             x_smooth[:t + 1] = x_smooth[:t + 1, :, k]
 
-        # x_smooth_mean
-        self.x_smooth_mean = np.mean(x_smooth, axis = 2)
+    #     # x_smooth_mean
+    #     self.x_smooth_mean = np.mean(x_smooth, axis = 2)
 
 
     # get smoothed value
